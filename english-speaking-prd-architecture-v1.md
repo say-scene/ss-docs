@@ -237,28 +237,30 @@ flowchart LR
 - same-origin이므로 CORS 불필요. 개발 중에는 Vite dev proxy 사용.
 - ALB: idle timeout 120s, SG 인바운드는 CloudFront origin-facing prefix list로 제한, 커스텀 헤더(`X-Origin-Verify`) 불일치 시 403 고정 응답.
 - 대화 API: 완성된 문장을 JSON으로 반환하고 캐시를 비활성화한다(`Cache-Control: no-store`). LLM 완료 시간에 맞는 ALB·CloudFront·클라이언트 타임아웃을 검증한다.
-- 요금: 종량제 + 상시 무료 티어(월 1TB / 1천만 요청)를 사용. AWS 오리진→CloudFront 전송은 무료. 실제 비용 비중은 GPU 노드, ALB, NAT가 큼. (본인 계정 가격 페이지에서 최종 확인)
+- 요금: 종량제 + 상시 무료 티어(월 1TB / 1천만 요청)를 사용. AWS 오리진→CloudFront 전송은 무료. 주요 비용은 GPU 노드, ALB 및 공인 IPv4 등이며 현재 구성에는 NAT Gateway를 사용하지 않음. (본인 계정 가격 페이지에서 최종 확인)
 
 ### 6.4 클러스터 (kubeadm + VPC CNI + CCM)
 
-- **컨트롤 플레인**: 단일 노드(t3.large 이상, 고정 사설 IP). CCM, Karpenter, AWS LBC 등 컨트롤러 배치(toleration). Karpenter가 관리하는 노드에는 Karpenter 자체를 두지 않음.
+- **네트워크**: 현재 private subnet 없이 public subnet 사용. 기본 EC2에는 EIP를 연결하고 확장 워커는 같은 public subnet에서 자동 할당 공인 IPv4로 인터넷에 접근. NAT Gateway는 사용하지 않음. 모든 노드는 사설 IP도 가지며 노드·Pod 간 통신과 워커 가입·Karpenter의 API 접근은 사설 IP 사용. EIP:6443은 외부 kubectl용이고 관리자 공인 IP/32로 SG 허용. API 인증서 SAN에도 EIP 포함.
+- **기본 CPU 노드**: 단일 EC2(t3.large 이상, 고정 사설 IP)가 컨트롤 플레인과 일반 CPU 워커를 겸함. kubeadm의 control-plane NoSchedule taint를 해당 노드에서 해제하고 앱 배치를 허용. CCM, Karpenter, AWS LBC 등 컨트롤러는 control-plane 라벨로 이 노드에 고정. 기본 노드는 Karpenter 관리 대상에 넣지 않음.
+- **CPU 확장 조건**: 기본 노드와 general 워커에 공통 앱 라벨을 사용. 파드의 requests·배치 조건이 기존 용량을 넘어서 Pending이 되면 Karpenter가 워커를 추가. 실제 CPU 사용률만으로 확장하지 않으며 부하 기반 파드 증가는 HPA/KEDA로 별도 구성. 기본 노드 선호는 soft affinity로 표현하고 관리 프로세스용 자원을 확보.
 - **CCM**: kubelet `cloud-provider=external`, `providerID` 설정, 인스턴스 소멸 시 Node 정리. route controller 비활성.
 - **VPC CNI 필수/추가 체크리스트**
   1. aws-node 권한: `AmazonEKS_CNI_Policy`를 **노드 인스턴스 프로파일**에 부착(IRSA webhook 닭-달걀 문제 회피). IRSA를 쓰면 webhook에 의존하지 말고 projected token을 DaemonSet에 직접 지정.
   2. SG: 컨트롤 플레인과 Karpenter 노드가 **같은 SG** 공유, `karpenter.sh/discovery` 태그, **자기 참조 allow-all**(노드↔노드, 파드 트래픽이 노드 SG를 탐).
   3. `--max-pods`: Custom AMI라 userData에서 직접 설정. `ENI수 × (ENI당 IPv4 − 1) + 2`, 또는 prefix delegation 사용.
-  4. 서브넷: 파드가 VPC IP 소모 → 넉넉한 CIDR. 태그: `karpenter.sh/discovery`, `kubernetes.io/role/elb`, `kubernetes.io/cluster/<name>`.
+  4. 서브넷: 파드가 VPC IP 소모 → 넉넉한 CIDR. CPU 확장용 검색 태그는 `karpenter.sh/discovery=<name>`. `kubernetes.io/role/elb` 등은 이후 LBC의 서브넷 발견 구성에 맞춰 별도 설정. EC2의 `kubernetes.io/cluster/<name>=owned` 소속 태그와 구분.
   5. kubeadm: `--pod-network-cidr` 불필요.
   6. ECR: AMI에 `ecr-credential-provider` + kubelet 설정, 노드 롤에 ECR 읽기 권한.
   7. IP warm pool(`WARM_IP_TARGET` 등) 튜닝.
   8. LBC: `target-type: ip`, SG 규칙 관리 활성화(또는 ALB SG → 노드 SG 인바운드 수동 허용).
-- 노드 조인: `kubeadm token create --ttl 0`(PoC), 토큰/CA 해시는 SSM Parameter Store(SecureString)에 두고 userData가 부팅 시 조회.
+- 노드 조인: `kubeadm token create --ttl 0`(PoC), SSM Parameter Store에 token은 SecureString, endpoint·CA 해시는 String으로 저장하고 userData가 부팅 시 조회. 파라미터 이름 `/클러스터/kubeadm/*`로 조회·권한을 연결하며 SSM 태그는 필수가 아님. 실행 절차는 [콘솔 중심 CPU 클러스터 가이드](./al2023-cpu-cluster-karpenter-guide.md) 참고.
 
 ### 6.5 노드 풀 & AMI
 
 | NodePool | 인스턴스 | 용도 | 비고 |
 |---|---|---|---|
-| `general` | c/m 계열 소형 | backend, Redis, ArgoCD, 관측성 | 스팟 허용; Redis 재시작 시 로컬 스냅샷에서 복구 |
+| `general` | c/m 계열 소형 | 기본 CPU 노드 용량을 초과하는 일반 앱 파드 | 첫 검증은 on-demand, 이후 스팟 허용; Redis 재시작 시 로컬 스냅샷에서 복구 |
 | `gpu` | g6.xlarge (L4) | Triton (LLM+STT) | on-demand, taint, **limits: GPU 2**, requirement로 L4 고정 |
 | `gpu-train` (Future) | L4급 | Kubeflow 학습 | 스팟 허용 |
 
@@ -363,7 +365,7 @@ python3 openai_frontend/main.py \
 - 스케일 인: `terminationGracePeriodSeconds` + preStop으로 진행 중 요청 처리. GPU 풀 consolidation은 `WhenEmpty`.
 - GPU 콜드스타트는 노드 기동 + 이미지/모델 로딩으로 수 분 → 데모 시간대에는 `minReplicas: 1`, 야간에는 0.
 - 가드레일: NodePool `limits`, KEDA `maxReplicaCount`, AWS Budgets 알림, 쿼터("Running On-Demand G and VT instances" vCPU 16 이상 신청).
-- 비용 큰 항목: GPU 노드(시간당 약 1달러대 ×1, 스케일아웃 시 추가), ALB 상시 요금, NAT Gateway(PoC는 퍼블릭 서브넷 + SG 폐쇄 또는 VPC 엔드포인트로 회피).
+- 비용 큰 항목: GPU 노드(시간당 약 1달러대 ×1, 스케일아웃 시 추가), ALB 상시 요금, 공인 IPv4 등. 현재 PoC는 public subnet + 기본 노드 EIP + 워커 자동 할당 공인 IPv4를 사용하며 NAT Gateway 없음.
 
 ### 6.8 관측성
 
