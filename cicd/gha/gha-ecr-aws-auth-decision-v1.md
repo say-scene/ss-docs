@@ -1,6 +1,7 @@
 # GitHub Actions → ECR 이미지 push: AWS 인증 방식 의사결정
 
-> 상태: **검토 중** · 작성일: 2026-10-21
+> 상태: **확정 (② GitHub OIDC + IAM Role)** · 작성일: 2026-10-21 · 확정일: 2026-10-22
+> 구축 매뉴얼: [gha-ecr-jib-push-manual-v1.md](gha-ecr-jib-push-manual-v1.md)
 > 근거 문서: [english-speaking-prd-architecture-v1.md](../../english-speaking-prd-architecture-v1.md) §6.10 CI/CD
 
 ---
@@ -236,12 +237,12 @@ sequenceDiagram
 
 | # | 항목 | 예시 / 메모 | 결정 |
 |---|---|---|---|
-| 1 | GitHub org/user 이름, 레포 이름 | `ss-be`와 문서의 `backend` 중 무엇인가 | |
-| 2 | `sub` 조건 기준 | 브랜치(`ref:refs/heads/main`, PoC에 단순) 또는 Environment | |
-| 3 | AWS 계정 ID, 리전 | 예: `ap-northeast-2` | |
-| 4 | ECR 리포지토리 이름, immutability | `backend` / 활성화 | |
-| 5 | Role 이름 규칙 | 예: `gha-ss-be-ecr-push`, `gha-triton-ecr-push` | |
-| 6 | `main` 브랜치 보호 | PR 필수, 직접 push 금지 | |
+| 1 | GitHub org/user 이름, 레포 이름 | `ss-be`와 문서의 `backend` 중 무엇인가 | `say-scene/ss_be` |
+| 2 | `sub` 조건 기준 | 브랜치(`ref:refs/heads/main`, PoC에 단순) 또는 Environment | 브랜치 `main`. immutable subject가 켜져 있어 실제 값은 `repo:say-scene@345080911/ss_be@1426408654:ref:refs/heads/main` |
+| 3 | AWS 계정 ID, 리전 | 예: `ap-northeast-2` | `944296702922` / `ap-northeast-2` |
+| 4 | ECR 리포지토리 이름, immutability | `backend` / 활성화 | `ss_be` / 비활성화(mutable) |
+| 5 | Role 이름 규칙 | 예: `gha-ss-be-ecr-push`, `gha-triton-ecr-push` | `gha-ss-be-ecr-push` |
+| 6 | `main` 브랜치 보호 | PR 필수, 직접 push 금지 | 적용하지 않음(미니 프로젝트, 직접 push) |
 
 ---
 
@@ -255,7 +256,8 @@ sequenceDiagram
 
 ## 8. 검증 상태
 
-- 이 문서의 API 이름, 권한 목록, 클레임 형식은 작성자의 지식을 기준으로 정리했다. **실제 계정에서 검증한 결과가 아니다.**
+- 이 문서의 API 이름, 권한 목록, 클레임 형식은 작성자의 지식을 기준으로 정리했다.
+- 2026-10-22에 ② 방식으로 실제 계정에 구축했고, `ss_be`의 ECR push 실행이 성공했다. 단, `sub` 클레임은 §2-②의 기본 형식이 아니라 immutable subject 형식이었다(§6 #2 참고).
 - 구현할 때 다음 공식 문서로 확인한다.
   - GitHub Docs: "Configuring OpenID Connect in Amazon Web Services"
   - AWS 문서: IAM OIDC 자격 증명 공급자, ECR 리포지토리 정책
