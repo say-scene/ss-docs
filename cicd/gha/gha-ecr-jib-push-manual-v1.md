@@ -36,7 +36,7 @@
 | `main` 브랜치 보호 | 없음 (미니 프로젝트, 직접 push) |
 | 태그 갱신 대상 | `say-scene/ss_k8s`의 `apps/ss-be/kustomization.yaml` → `images[ss_be].newTag` |
 | GitHub App | `say-scene-ss-k8s-writer` (org 소유, `ss_k8s`에만 설치, Contents 쓰기) |
-| App ID 보관 | Repository Variable `SS_K8S_APP_ID` |
+| App ID 보관 | Environment `ss-k8s-write`의 Variable `SS_K8S_APP_ID` |
 | App 개인키 보관 | Environment `ss-k8s-write`의 Secret `SS_K8S_APP_PRIVATE_KEY` (`main` 브랜치만 허용) |
 
 ---
@@ -424,13 +424,16 @@ gh variable set AWS_ROLE_ARN --repo say-scene/ss_be --body "arn:aws:iam::9442967
 
 | 값 | 위치 | 이름 |
 |---|---|---|
-| App ID | Settings → Secrets and variables → Actions → **Variables** 탭 → New repository variable | `SS_K8S_APP_ID` |
+| App ID | Settings → Environments → `ss-k8s-write` → **Environment variables** → Add environment variable | `SS_K8S_APP_ID` |
 | 개인키(`.pem` 전체) | Settings → Environments → `ss-k8s-write` → **Environment secrets** → Add environment secret | `SS_K8S_APP_PRIVATE_KEY` |
+
+- App ID와 개인키를 모두 `ss-k8s-write` environment에 둔다. App 관련 값이 한 곳에 모여, App을 교체하거나 정리할 때 environment 하나만 보면 된다. App ID는 비밀 값이 아니므로 Secret이 아니라 Variable에 넣는다.
+- workflow는 그대로 `vars.SS_K8S_APP_ID`로 읽는다. `update-tag` job에 `environment: ss-k8s-write`가 있어서 environment variable이 읽힌다. 같은 이름의 Repository variable이 있으면 environment 값이 우선하므로, 헷갈리지 않게 Repository variable에는 두지 않는다.
 
 CLI로는 아래처럼 등록한다.
 
 ```bash
-gh variable set SS_K8S_APP_ID --repo say-scene/ss_be --body "<App ID 숫자>"
+gh variable set SS_K8S_APP_ID --repo say-scene/ss_be --env ss-k8s-write --body "<App ID 숫자>"
 ```
 
 ```bash
@@ -444,6 +447,10 @@ gh secret set SS_K8S_APP_PRIVATE_KEY --repo say-scene/ss_be --env ss-k8s-write <
 
 ```bash
 gh api repos/say-scene/ss_be/environments/ss-k8s-write --jq '{deployment_branch_policy, can_admins_bypass}'
+```
+
+```bash
+gh variable list --repo say-scene/ss_be --env ss-k8s-write
 ```
 
 ```bash
@@ -492,7 +499,7 @@ gh api repos/say-scene/ss_k8s/contents/apps/ss-be/kustomization.yaml --jq .conte
 | 수동 실행만 실패 | `main`이 아닌 브랜치에서 실행함 | 신뢰 정책과 environment가 `main`만 허용한다. `main`에서 실행한다 |
 | ECR push 단계에서 `name unknown` / `repository does not exist` | ECR 리포지토리 이름이나 리전 불일치 | `ss_be` 리포지토리가 `ap-northeast-2`에 있는지 확인한다 |
 | ECR push 단계에서 `AccessDenied` | 권한 정책 Resource ARN 불일치 | §4.2 권한 정책의 ARN을 확인한다 |
-| `create-github-app-token`에서 app-id나 private-key 입력 누락 오류 | `SS_K8S_APP_ID` Variable 미등록, 또는 개인키를 environment가 아닌 곳에 등록함 | §5.2-5대로 등록 위치를 확인한다 |
+| `create-github-app-token`에서 app-id나 private-key 입력 누락 오류 | `SS_K8S_APP_ID` Variable이나 개인키 Secret을 `ss-k8s-write` environment가 아닌 곳에 등록함 | §5.2-5대로 등록 위치를 확인한다 |
 | `create-github-app-token`에서 설치를 찾지 못함 | 앱이 `say-scene` org에 설치되지 않았거나 `ss_k8s`가 설치 대상에 없음 | §5.2-1, 3을 확인한다. 개인 계정 소유 앱이면 org로 소유권을 이전한다 |
 | `ss_k8s` checkout이나 push에서 `403` / `Permission denied` | App의 Contents 권한이 Read only | App 권한을 Read and write로 바꾸고, org 설치 화면에서 변경된 권한을 승인한다 |
 | `update-tag`가 성공했는데 `ss_k8s` 커밋이 없음 | 같은 SHA로 재실행해서 `newTag`가 이미 같음 | 정상 동작이다(`git diff --quiet`로 건너뜀) |
@@ -525,4 +532,5 @@ gh api repos/say-scene/ss_k8s/contents/apps/ss-be/kustomization.yaml --jq .conte
 - GitHub App 태그 갱신을 추가한 workflow(`366bff4`)를 `main`에 push했고, `push`와 `update-tag` job이 모두 **성공했다** ([run 39737304461](https://github.com/say-scene/ss_be/actions/runs/39737304461)).
   - Jib 로그: `Built and pushed image as 944296702922.dkr.ecr.ap-northeast-2.amazonaws.com/ss_be:366bff4`
   - `ss_k8s` 커밋 `6d06130` (`say-scene-ss-k8s-writer[bot]`): `newTag`가 `6d33334` → `366bff4`로 바뀌었다.
+- `SS_K8S_APP_ID`를 Repository variable에서 `ss-k8s-write` environment variable로 옮긴 뒤 수동 실행(`workflow_dispatch`)이 **성공했다** ([run 39758974204](https://github.com/say-scene/ss_be/actions/runs/39758974204)). 같은 SHA라 `ss_k8s` 커밋은 생기지 않았다(정상).
 - 콘솔 화면의 항목 이름은 AWS·GitHub UI 변경으로 달라질 수 있다.
