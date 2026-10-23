@@ -237,10 +237,10 @@ sequenceDiagram
 
 | # | 항목 | 예시 / 메모 | 결정 |
 |---|---|---|---|
-| 1 | GitHub org/user 이름, 레포 이름 | `ss-be`와 문서의 `backend` 중 무엇인가 | `say-scene/ss_be` |
-| 2 | `sub` 조건 기준 | 브랜치(`ref:refs/heads/main`, PoC에 단순) 또는 Environment | 브랜치 `main`. immutable subject가 켜져 있어 실제 값은 `repo:say-scene@345080911/ss_be@1426408654:ref:refs/heads/main` |
+| 1 | GitHub org/user 이름, 레포 이름 | `ss-be`와 문서의 `backend` 중 무엇인가 | `say-scene/ss-be` |
+| 2 | `sub` 조건 기준 | 브랜치(`ref:refs/heads/main`, PoC에 단순) 또는 Environment | 브랜치 `main`. immutable subject가 켜져 있어 실제 값은 `repo:say-scene@345080911/ss-be@1426408654:ref:refs/heads/main` |
 | 3 | AWS 계정 ID, 리전 | 예: `ap-northeast-2` | `944296702922` / `ap-northeast-2` |
-| 4 | ECR 리포지토리 이름, immutability | `backend` / 활성화 | `ss_be` / 비활성화(mutable) |
+| 4 | ECR 리포지토리 이름, immutability | `backend` / 활성화 | `ss-be` / 비활성화(mutable) |
 | 5 | Role 이름 규칙 | 예: `gha-ss-be-ecr-push`, `gha-triton-ecr-push` | `gha-ss-be-ecr-push` |
 | 6 | `main` 브랜치 보호 | PR 필수, 직접 push 금지 | 적용하지 않음(미니 프로젝트, 직접 push) |
 
