@@ -1,6 +1,6 @@
 # Karpenter CPU 확장 풀(`general`) 결정 기록
 
-> 상태: **진행 중 (0단계 사전 검증 완료, 1단계 매니페스트 작성 완료 · ss-k8s 미커밋)** · 작성일: 2026-10-26
+> 상태: **진행 중 (0단계 사전 검증 완료, 1단계 매니페스트 작성 완료 · ss-k8s push 완료, main 머지 전)** · 작성일: 2026-10-26
 > 근거 문서: [english-speaking-prd-architecture-v1.md](english-speaking-prd-architecture-v1.md) §6.4·§6.5·§7, [al2023-cpu-cluster-karpenter-guide.md](al2023-cpu-cluster-karpenter-guide.md) "이후 선택: Karpenter 설치"·13~17단계
 
 ---
@@ -20,7 +20,7 @@
 |---|---|---|
 | 사전 | 가이드 0~12단계(AMI·IAM·SSM·수동 워커 조인·Argo CD) | 완료 |
 | 0 | 사전 검증(태그·kubelet 설정·라벨·여유·SSM) | **완료** — §4 |
-| 1 | ss-k8s 매니페스트 작성 | **작성 완료**, 브랜치 `feature/karpenter-general-nodepool` (커밋·push 전) |
+| 1 | ss-k8s 매니페스트 작성 | **작성 완료**, 브랜치 `feature/karpenter-general-nodepool` 커밋 `8ddf53a` push 완료 (main 머지 전) |
 | 2 | Argo CD에 Karpenter OCI Helm 저장소 연결 (가이드 K-1) | 대기 |
 | 3 | `karpenter` Application 생성·Sync (가이드 K-2, VALUES는 §6) | 대기 |
 | 4 | `karpenter-nodes` Application 생성·Sync → NodeClass/NodePool `Ready=True` | 대기 |
@@ -174,7 +174,7 @@ controller:
 
 - **5단계 replicas 재산정**: 가이드 15-2의 31개는 maxPods 기준이다. 이번 구성은 CPU가 먼저 부족하다(테스트 파드 100m 기준 기본 노드 1개 + 워커 약 16개). 31개면 약 14개가 계속 Pending이므로 검증 시점에 값을 다시 정한다.
 - 16단계 private ECR pull: 테스트 이미지 확보 여부 미정. 없으면 미검증으로 기록한다.
-- ss-k8s 매니페스트(`feature/karpenter-general-nodepool`) 커밋·push·머지.
+- ss-k8s 매니페스트(`feature/karpenter-general-nodepool`) main 머지. 4단계 `karpenter-nodes`의 Revision은 머지 후 `main`을 사용한다.
 - Loki/Tempo용 S3 권한과 배치는 관측성 구성 때 결정.
 
 ---
