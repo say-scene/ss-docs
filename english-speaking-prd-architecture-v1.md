@@ -233,6 +233,7 @@ flowchart LR
 ### 6.3 엣지: CloudFront + S3 + ALB
 
 - Behavior: `/*` → S3(OAC), `/api/*` → ALB(HTTP origin, 캐시 비활성, origin 응답 타임아웃 60s).
+- ArgoCD 관리 화면: 기존 CloudFront 배포의 `/argocd`와 `/argocd/*` → ArgoCD ALB(HTTP origin). ArgoCD rootpath·basehref는 `/argocd`로 맞추고 URI를 재작성하지 않는다. 두 behavior는 모든 HTTP 메서드·캐시 비활성·쿠키/인증 헤더 전달을 사용하며, 기존 S3용 SPA 함수는 연결하지 않는다.
 - **SPA 라우팅**: 배포 전체에 적용되는 "사용자 지정 오류 응답(403/404→index.html)"은 API의 404까지 바꾸므로 사용 금지. S3 behavior에만 **CloudFront Function(viewer-request)** 으로 확장자 없는 경로를 `/index.html`로 재작성.
 - same-origin이므로 CORS 불필요. 개발 중에는 Vite dev proxy 사용.
 - ALB: idle timeout 120s, SG 인바운드는 CloudFront origin-facing prefix list로 제한, 커스텀 헤더(`X-Origin-Verify`) 불일치 시 403 고정 응답.
@@ -419,7 +420,7 @@ Redis 매니페스트는 `k8s-manifests`에 두며 공식 이미지 버전을 �
 
 **배포 연동**
 - ArgoCD(app-of-apps)가 `k8s-manifests`를 바라본다: 플랫폼(VPC CNI·CCM·LBC·Karpenter·KEDA·device-plugin·DCGM·관측성) / 앱 분리.
-- **부트스트랩 순서**(ArgoCD가 CNI 위에서 돌므로): kubeadm init → VPC CNI → CCM → (ArgoCD) → 나머지 전부 ArgoCD.
+- **부트스트랩 순서**(ArgoCD가 CNI 위에서 돌므로): kubeadm init → VPC CNI → CCM → AWS Load Balancer Controller(Helm) → ArgoCD → Ingress·CloudFront 공개·로그인 → ArgoCD 웹 콘솔에서 일반 앱 배포 → 필요할 때 Karpenter 설치. Karpenter는 웹 콘솔에서 CRD 포함 단일 Helm Application으로 만들고, NodeClass·NodePool도 Git 소스를 연결한 별도 Application으로 배포한다. Application YAML은 직접 작성하지 않는다. CNI·CCM·LBC의 ArgoCD 이관은 별도 작업이며, 최초 설치와 중복 관리하지 않는다.
 
 ---
 
