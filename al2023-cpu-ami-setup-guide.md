@@ -121,6 +121,14 @@ getenforce
 
 AL2023 기본값은 `Permissive`입니다. 기존에 `Enforcing`으로 변경한 이미지라면 이 안내와 별도로 Kubernetes·CNI에 맞는 정책 구성이 필요합니다. [AL2023 SELinux 기본값](https://docs.aws.amazon.com/linux/al2023/ug/selinux-modes.html)
 
+### 3-1. VPC CNI와 AL2023 네트워크 관리 충돌 방지
+
+필요한 이유: 일반 AL2023의 `amazon-ec2-net-utils`는 Pod용 보조 IP를 호스트 ENI에도 붙여, 노드가 Pod IP를 자기 주소로 처리하게 만들 수 있습니다. 커널 forwarding 설정만으로 이 충돌이 방지되지는 않습니다.
+
+**AMI 생성 전 필수 단계입니다.** [AL2023 VPC CNI 재발 방지 가이드](./al2023-vpc-cni-network-prevention-guide.md)의 **해결 → AMI에 재발 방지 설정·검증 후 적용**에 따라, init 이전 제작용 EC2에 primary DHCP·secondary ENI CNI 관리·외부 경로 보존 설정을 적용하고 재부팅 검증합니다. 아직 이 설치 문서의 나머지 패키지 작업이 남았다면 네트워크 재부팅 검증까지만 완료하고, **최종 AMI는 모든 설치를 끝낸 뒤** 생성합니다.
+
+해당 구성은 primary가 `ens5`인 IPv4·ENA CPU 노드 전용입니다. IP·MAC을 AMI에 고정하지 않습니다. EC2에 접속해 설정 파일을 직접 생성하는 방식이며 `.sh` 파일은 필요 없습니다. 이미 init한 기본 노드에는 제작용 설정 명령을 실행하지 않고, 재발 방지 가이드의 별도 유지보수 절차를 따릅니다.
+
 ## 4. containerd 설치 및 cgroup·CRI 설정
 
 설치합니다.
@@ -430,16 +438,16 @@ sudo crictl \
   info
 ```
 
-| 항목 | AMI 제작 전 통과 기준 |
-|---|---|
-| swap | 사용 중인 swap 없음 |
-| 네트워크 설정 | IP forwarding 등 설정 유지 |
-| containerd | 자동 시작·실행 정상, CRI `RuntimeReady: true` |
-| Kubernetes | 세 도구 버전 일치, kubelet 자동 시작 설정 |
-| ECR provider | 실행 파일·설정·kubelet 연결 확인 |
-| AWS CLI | v2 실행 가능 |
-| cloud-init | 현재 부팅 처리 완료 |
-| 시간 동기화 | chronyd 실행·동기화 정상 |
-| 클러스터 상태 | 아직 `kubeadm init/join` 미실행 |
+| 항목           | AMI 제작 전 통과 기준                        |
+| ------------ | ------------------------------------- |
+| swap         | 사용 중인 swap 없음                         |
+| 네트워크 설정      | IP forwarding 등 설정 유지                 |
+| containerd   | 자동 시작·실행 정상, CRI `RuntimeReady: true` |
+| Kubernetes   | 세 도구 버전 일치, kubelet 자동 시작 설정          |
+| ECR provider | 실행 파일·설정·kubelet 연결 확인                |
+| AWS CLI      | v2 실행 가능                              |
+| cloud-init   | 현재 부팅 처리 완료                           |
+| 시간 동기화       | chronyd 실행·동기화 정상                     |
+| 클러스터 상태      | 아직 `kubeadm init/join` 미실행            |
 
 여기까지가 **공통 설치·설정 검증 범위**입니다. AMI 캡처 직전에는 이미지 일반화와 비밀 정보 잔존 여부를 확인하고, AMI 생성 후 원래 EC2에서 `kubeadm init`을 진행하면 됩니다.

@@ -1,4 +1,4 @@
-# AL2023 Custom AMI 이후 CPU 클러스터 실행 가이드 — AWS 콘솔 중심
+# AL2023 Custom AMI 이후 CPU 클러스터 실행 가이드
 
 선행 문서: [CPU AMI 설치·확인](./al2023-cpu-ami-setup-guide.md)
 
@@ -17,10 +17,11 @@ AMI가 `available`이고, 최초 EC2에서 아직 `kubeadm init`을 하지 않�
 | 표기 | 실제 위치·담당 작업 |
 |---|---|
 | **AWS 콘솔** | 브라우저에서 AWS에 로그인. AMI·VPC·SG·태그 확인, IAM 역할·정책, SSM 파라미터 생성, EC2 상태 확인 |
+| **Argo CD 웹 콘솔** | Ingress 도메인으로 로그인한 화면. 저장소 연결, Application 생성, Helm 설정 입력, Sync·상태·로그 확인 |
 | **기본 노드 셸** | 최초 AL2023 EC2에 SSH 또는 Session Manager로 접속한 터미널. kubeadm·kubectl·Helm 실행 및 YAML·userData 파일 작성 |
 | **확장 워커 내부** | Karpenter가 만든 새 EC2. cloud-init이 userData를 자동 실행. 문제 진단 때만 직접 접속 |
 
-AWS CLI는 기본 노드에서 **현재 역할 신원을 확인**할 때와 워커 userData가 **SSM 값을 자동 조회**할 때만 사용한다. IAM·태그·파라미터 생성은 콘솔에서 처리한다. Karpenter의 EC2 생성·종료는 설치된 controller가 자동 수행하므로 사람이 콘솔에서 매번 인스턴스를 만들 필요는 없다.
+IAM·태그·파라미터 생성은 AWS 콘솔에서 처리한다. AWS CLI는 기본 노드의 **현재 역할 신원 확인**, 워커 userData의 **SSM 자동 조회**에 사용한다. 기존 EC2의 IMDS hop limit 변경은 콘솔에서 지원하지 않아 12-1단계에서 **AWS CloudShell**을 사용한다. Karpenter의 EC2 생성·종료는 설치된 controller가 자동 수행하므로 사람이 콘솔에서 매번 인스턴스를 만들 필요는 없다.
 
 기본 노드의 **컨트롤 플레인**은 API 서버·etcd·scheduler 등 클러스터를 관리하는 역할이다. 같은 EC2의 kubelet이 일반 앱 파드도 실행하므로 이 노드는 **워커 역할도 겸한다**. 아래에서는 이 EC2를 “기본 노드”, 변수에서는 `CP_...`로 표기한다.
 
@@ -32,7 +33,7 @@ flowchart LR
   W --> J["SSM 조회 → kubeadm join → 앱 실행"]
 ```
 
-- CCM·Karpenter는 기본 노드에 고정한다. 기본 노드는 Karpenter 관리 대상에 넣지 않아 워커가 0대여도 유지된다.
+- CCM·LBC·Argo CD·Karpenter는 기본 노드에 고정한다. 기본 노드는 Karpenter 관리 대상에 넣지 않아 워커가 0대여도 유지된다.
 - 일반 CPU 앱은 기본 노드와 확장 워커에 공통 라벨을 사용한다. 기본 노드를 선호하는 배치는 15단계에서 다룬다.
 - **Karpenter는 실제 CPU 사용률이 100%가 됐다는 이유만으로 확장하지 않는다.** 스케줄러가 파드의 `resources.requests`·노드의 allocatable·배치 조건을 보고 배치 불가로 판단한 파드가 있어야 확장한다. 부하에 따라 파드 수를 늘리는 기능은 HPA/KEDA로 별도 구성한다.
 - 기본 노드가 앱도 실행하므로 앱의 requests/limits를 지정하고 관리 프로세스에 여유를 둔다. 이 예시는 kubelet에 시스템·Kubernetes 프로세스용 예약량도 설정한다.
@@ -51,6 +52,8 @@ flowchart LR
 | Kubernetes | 선행 AMI에 설치한 1.35.x 그대로 |
 | AWS CCM | v1.35.2, 소스 커밋·이미지 tag 고정 |
 | VPC CNI | v1.21.1 소스 커밋 고정 |
+| AWS Load Balancer Controller(LBC) | controller v3.6.1·Helm chart 3.6.1 |
+| Argo CD | v3.5.5, non-HA 매니페스트 |
 | Karpenter controller·CRD | 1.15.0으로 일치 |
 | Helm | v3.19.0 설치 예시 |
 | 확장 워커 | m6i.large/c6i.large, on-demand |
@@ -58,9 +61,15 @@ flowchart LR
 
 최신 버전이라는 뜻은 아니다. CNI 해당 릴리스의 README 호환성 표에는 1.35 인증이 명시되어 있지 않아 실제 PoC 검증이 필요하다. 다른 Kubernetes minor라면 CCM·provider·Karpenter 호환성을 다시 맞춘다.
 
+**지금 진행할 순서:** kubeadm init → VPC CNI → CCM → 기본 노드 준비 → **LBC → Argo CD → Ingress·CloudFront 공개 → 웹 콘솔 로그인 → 일반 앱 배포**. **12-2단계까지 완료하면 Argo CD 공개가 끝난다.** Karpenter 설치는 이 과정의 선행 조건이 아니다.
+
+**Karpenter는 앱 배포 후 필요할 때 설치한다.** 9~11단계의 SSM·워커 가입 준비를 아직 하지 않았어도 12단계의 Argo CD 공개를 먼저 진행할 수 있다. 이후 확장이 필요해지면 이 준비를 마친 뒤 문서의 **“이후 선택: Karpenter 설치” → 13~18단계**를 진행한다. 그전까지 앱은 현재 노드의 가용 자원 범위에서 실행된다.
+
+**Argo CD에서 가능한 작업은 웹 콘솔 기준으로 안내한다.** Application YAML을 직접 만들거나 `kubectl apply`로 등록하지 않는다. 앱의 실제 Deployment·Service 등은 Git 매니페스트 또는 Helm 차트로 준비하고, 해당 소스의 연결·배포·동기화는 웹 콘솔에서 처리한다.
+
 ## 0. 콘솔에서 값을 확인하고 기본 노드에 기록한다
 
-필요한 이유: 클러스터 이름은 태그·SSM 경로·IAM 조건·Karpenter 설정을 연결한다. 같은 값을 기록해야 콘솔과 노드 설정이 서로 다른 자원을 가리키지 않는다.
+필요한 이유: 클러스터 이름은 태그·SSM 경로·워커 IAM 리소스 경로·Karpenter 설정을 연결한다. 같은 값을 기록해야 콘솔과 노드 설정이 서로 다른 자원을 가리키지 않는다.
 
 먼저 콘솔 오른쪽 위에서 사용할 리전과 계정 ID를 확인한다. 이 문서의 예시는 서울 `ap-northeast-2`, 클러스터 이름 `sayscene`이다. 다른 이름이면 이후의 태그 키·값과 SSM 경로까지 함께 바꾼다.
 
@@ -94,7 +103,7 @@ export WORKER_PROFILE="SaySceneWorkerRole"
 export ROOT_DEVICE="REPLACE_AMI_ROOT_DEVICE"
 export ROOT_VOLUME_GIB="40"
 export SERVICE_CIDR="10.96.0.0/12"
-export MAX_PODS="20"
+export MAX_PODS="30"
 export WORKER_PUBLIC_IP="true"
 export HELM_VERSION="v3.19.0"
 export KARPENTER_VERSION="1.15.0"
@@ -150,11 +159,11 @@ VPC CIDR은 실제 노드·Pod 주소 범위이고 Service CIDR은 ClusterIP용 
 
 아래 예시는 `CLUSTER_NAME=sayscene`이다. 키와 값은 대소문자까지 정확히 입력한다.
 
-| 대상 | 콘솔 경로 | 태그 키 | 태그 값 | 붙이는 이유 |
-|---|---|---|---|---|
-| 워커 후보 서브넷 | VPC → 서브넷 → 대상 → 태그 → 태그 관리 | `karpenter.sh/discovery` | `sayscene` | NodeClass의 subnetSelectorTerms가 이 값으로 후보를 검색 |
-| 공통 노드 SG | EC2 → 보안 그룹 → 대상 → 태그 → 태그 관리 | `karpenter.sh/discovery` | `sayscene` | NodeClass의 securityGroupSelectorTerms가 이 SG를 검색 |
-| 기본 EC2 | EC2 → 인스턴스 → 최초 EC2 → 태그 → 태그 관리 | `kubernetes.io/cluster/sayscene` | `owned` | AWS CCM이 이 EC2의 클러스터 소속을 식별 |
+| 대상        | 콘솔 경로                            | 태그 키                             | 태그 값       | 붙이는 이유                                          |
+| --------- | -------------------------------- | -------------------------------- | ---------- | ----------------------------------------------- |
+| 워커 후보 서브넷 | VPC → 서브넷 → 대상 → 태그 → 태그 관리      | `karpenter.sh/discovery`         | `sayscene` | NodeClass의 subnetSelectorTerms가 이 값으로 후보를 검색    |
+| 공통 노드 SG  | EC2 → 보안 그룹 → 대상 → 태그 → 태그 관리    | `karpenter.sh/discovery`         | `sayscene` | NodeClass의 securityGroupSelectorTerms가 이 SG를 검색 |
+| 기본 EC2    | EC2 → 인스턴스 → 최초 EC2 → 태그 → 태그 관리 | `kubernetes.io/cluster/sayscene` | `owned`    | AWS CCM이 이 EC2의 클러스터 소속을 식별                     |
 
 기존 태그는 유지하고 **새 태그 추가 → 키·값 입력 → 저장**한다. 확인할 때는 각 자원의 태그 탭을 다시 연다. `Name` 태그는 사람이 보는 이름이며, 이번 자동 확장의 필수 입력은 아니다.
 
@@ -164,7 +173,7 @@ VPC CIDR은 실제 노드·Pod 주소 범위이고 Service CIDR은 ClusterIP용 
 
 | 생성된 확장 EC2의 태그 키 | 값 예시 | 용도 |
 |---|---|---|
-| `kubernetes.io/cluster/sayscene` | `owned` | 클러스터 소속·IAM의 생성/종료 권한 조건 |
+| `kubernetes.io/cluster/sayscene` | `owned` | 클러스터 소속 식별. 이번 단순화 IAM 정책에서는 태그를 권한 조건으로 사용하지 않음 |
 | `karpenter.sh/nodepool` | `general` | 이 EC2를 만든 NodePool |
 | `karpenter.k8s.aws/ec2nodeclass` | `general` | EC2 설정을 제공한 NodeClass |
 | `karpenter.sh/nodeclaim` | 자동 생성된 이름 | Kubernetes의 NodeClaim과 EC2 연결 |
@@ -174,14 +183,14 @@ VPC CIDR은 실제 노드·Pod 주소 범위이고 Service CIDR은 ClusterIP용 
 
 ### 1-4. SSM 경로·IAM·Kubernetes 라벨은 AWS 태그와 별개
 
-| 항목 | 설정 위치 | 이번 구성에서 의미 |
-|---|---|---|
-| `/sayscene/kubeadm/token` 등 | SSM Parameter Store의 **이름** | 파라미터 조회 경로. 태그가 아님 |
-| SSM 파라미터의 태그 | Parameter Store → 파라미터 → 태그 | 선택적 관리 정보. 이 가이드에서는 불필요 |
-| IAM 역할·프로파일의 discovery 태그 | IAM | 미리 만든 프로파일 이름을 사용하므로 불필요 |
-| `sayscene.io/workload=general` | kubectl / NodePool YAML | 앱을 받을 노드의 **Kubernetes 라벨**. AWS 콘솔 태그로 추가해도 스케줄링에는 반영되지 않음 |
-| `node-role.kubernetes.io/control-plane:NoSchedule` | kubectl로 조회·삭제 | 일반 파드를 막는 **Kubernetes taint**. 8단계에서 기본 노드에 한해 해제 |
-| `kubernetes.io/role/elb` 등 | 나중에 ALB/LBC 도입 시 서브넷 | 현재 기본 노드U 확장 단계에서는 추가하지 않음 |
+| 항목                                                 | 설정 위치                       | 이번 구성에서 의미                                                  |
+| -------------------------------------------------- | --------------------------- | ----------------------------------------------------------- |
+| `/sayscene/kubeadm/token` 등                        | SSM Parameter Store의 **이름** | 파라미터 조회 경로. 태그가 아님                                          |
+| ~~SSM 파라미터의 태그~~                                   | Parameter Store → 파라미터 → 태그 | 선택적 관리 정보. 이 가이드에서는 불필요                                     |
+| IAM 역할·프로파일의 discovery 태그                          | IAM                         | 미리 만든 프로파일 이름을 사용하므로 불필요                                    |
+| `sayscene.io/workload=general`                     | kubectl / NodePool YAML     | 앱을 받을 노드의 **Kubernetes 라벨**. AWS 콘솔 태그로 추가해도 스케줄링에는 반영되지 않음 |
+| `node-role.kubernetes.io/control-plane:NoSchedule` | kubectl로 조회·삭제              | 일반 파드를 막는 **Kubernetes taint**. 8단계에서 기본 노드에 한해 해제          |
+| `kubernetes.io/role/elb` 등                         | 나중에 ALB/LBC 도입 시 서브넷        | 현재 기본 노드U 확장 단계에서는 추가하지 않음                                  |
 
 **통과 기준:** AMI·네트워크·IP 여유 확인, 위 세 대상에 정확한 태그 저장, 불필요한 discovery 후보 없음.
 
@@ -196,10 +205,10 @@ VPC CIDR은 실제 노드·Pod 주소 범위이고 Service CIDR은 ClusterIP용 
 3. 권한 정책에서 아래 공통 정책을 선택한다.
 4. 역할 이름을 지정해 생성한다.
 
-| 역할 이름 | 연결 대상 | 공통 AWS 관리형 정책 |
-|---|---|---|
+| 역할 이름                      | 연결 대상  | 공통 AWS 관리형 정책                                                |
+| -------------------------- | ------ | ------------------------------------------------------------ |
 | `SaySceneControlPlaneRole` | 기본 노드만 | `AmazonEC2ContainerRegistryReadOnly`, `AmazonEKS_CNI_Policy` |
-| `SaySceneWorkerRole` | 확장 워커만 | `AmazonEC2ContainerRegistryReadOnly`, `AmazonEKS_CNI_Policy` |
+| `SaySceneWorkerRole`       | 확장 워커만 | `AmazonEC2ContainerRegistryReadOnly`, `AmazonEKS_CNI_Policy` |
 
 CNI 정책 이름에 EKS가 있어도 self-managed 클러스터의 aws-node가 사용할 수 있다. Session Manager로 접속한다면 해당 역할에 `AmazonSSMManagedInstanceCore`도 추가하고 SSM Agent·통신 경로를 준비한다. 이는 **Session Manager 접속용**이며, 워커의 가입 파라미터 읽기 권한은 3단계에서 별도로 준다.
 
@@ -213,39 +222,53 @@ IAM 콘솔에서 **EC2 사용 사례로** 역할을 만들면 **동일 이름의
 
 필요한 이유: Karpenter는 EC2 생성·태그·조회·종료와 지정 워커 역할 전달 권한이 필요하다. 워커는 지정된 SSM 가입 경로만 읽으면 되므로 권한을 따로 연결한다.
 
-### 3-1. 정책 JSON에서 실제 값 치환
+### 3-1. 기본 노드 정책은 그대로 사용하고 워커 정책만 값 치환
 
 문서와 함께 제공하는 파일을 편집기로 연다. 파일 편집은 로컬 PC에서 해도 되며 노드에 업로드할 필요는 없다.
 
 - [기본 노드의 Karpenter·CCM 정책](./aws-console-iam/base-node-controller-policy.template.json)
 - [워커의 가입 정보 읽기 정책](./aws-console-iam/worker-join-read-policy.template.json)
 
-파일의 아래 문자열을 **모두 찾아 바꾸기**한다. 이 파일은 EKS 기본 예제의 역할 생성을 실행하지 않고, 고정 Karpenter 소스의 NodeLifecyclePolicy·ResourceDiscoveryPolicy에 필요한 권한만 조합한 것이다.
+기본 노드 정책은 **24개 고유 Action을 사용처·목적별 6개 Statement로 구분하고, 모든 Resource를 "*"로 통일**했다. 각 `Sid`를 보면 어떤 구성 요소가 무슨 목적으로 사용하는지 알 수 있다. ARN·리전·태그·PassRole 조건이 없어 **값 치환 없이 그대로 사용**하며, `ec2:*` 같은 Action 와일드카드는 사용하지 않는다.
 
-| 치환할 문자열 | 입력값 예시 |
+| Sid | 사용처·목적 |
 |---|---|
-| `REPLACE_REGION` | `ap-northeast-2` |
-| `REPLACE_ACCOUNT_ID` | 자신의 12자리 AWS 계정 ID |
-| `REPLACE_CLUSTER_NAME` | `sayscene` |
-| `REPLACE_WORKER_ROLE_NAME` | `SaySceneWorkerRole` — 프로파일 이름이 아닌 **역할 이름** |
+| `KarpenterEC2Lifecycle` | Karpenter: EC2·Fleet·Launch Template 생성, 태그 지정, 인스턴스 종료·Launch Template 삭제 |
+| `KarpenterEC2Discovery` | Karpenter: AMI·인스턴스·유형·서브넷·SG 등 배치에 필요한 EC2 정보 조회 |
+| `CCMEC2Discovery` | CCM: EC2 인스턴스·가용 영역·인스턴스 토폴로지 조회 |
+| `KarpenterIAMIntegration` | Karpenter: 기존 인스턴스 프로파일 조회 및 EC2에 역할 전달 |
+| `KarpenterPricingRead` | Karpenter: 인스턴스 가격 정보 조회 |
+| `KarpenterSSMRead` | Karpenter: SSM 파라미터 기반 AMI 정보 조회 |
 
-원본 템플릿에 실제 계정 값을 저장할 필요는 없다. 편집한 JSON을 다음 콘솔 입력에 사용한다. 역할을 별도 IAM path 아래 만들었다면 PassRole의 역할 ARN도 실제 path가 포함된 ARN으로 맞춘다.
+`ec2:DescribeInstances`는 Karpenter와 CCM 양쪽에서 사용하므로 두 Statement에 명시했다. `Sid`는 읽기 위한 구분이며, 이 정책을 사용하는 프로세스별로 권한을 격리하는 장치는 아니다.
+
+이 정책은 지정 Action을 클러스터·리전·역할로 제한하지 않는다. 다른 EC2에 대한 종료 권한과 다른 역할에 대한 PassRole도 포함하므로 기본 노드 역할의 권한 범위가 기존 정책보다 넓어진다.
+
+**워커 정책 파일에서만** 아래 문자열을 모두 찾아 바꾼다. 워커의 SSM 읽기 권한은 기존 가입 경로 범위를 유지한다.
+
+| 치환할 문자열                    | 입력값 예시                                       |
+| -------------------------- | -------------------------------------------- |
+| `REPLACE_REGION`           | `ap-northeast-2`                             |
+| `REPLACE_ACCOUNT_ID`       | 자신의 12자리 AWS 계정 ID                           |
+| `REPLACE_CLUSTER_NAME`     | `sayscene`                                   |
+
+원본 템플릿에 실제 계정 값을 저장할 필요는 없다. 기본 노드 JSON 원문과 값을 치환한 워커 JSON을 다음 콘솔 입력에 사용한다.
 
 ### 3-2. 콘솔의 역할별 인라인 정책 생성
 
 1. **IAM → 역할 → SaySceneControlPlaneRole → 권한 → 권한 추가 → 인라인 정책 생성**.
-2. **JSON** 편집기에서 기존 내용을 지우고, 치환한 기본 노드 정책 전체를 붙여 넣는다.
-3. 검증 메시지와 `REPLACE_` 잔존 여부를 확인하고 정책 이름 `SaySceneKarpenterAndCCM`으로 저장한다.
+2. **JSON** 편집기에서 기존 내용을 지우고, 기본 노드 정책 전체를 그대로 붙여 넣는다.
+3. 검증 메시지를 확인하고 정책 이름 `SaySceneKarpenterAndCCM`으로 저장한다. 이미 같은 정책이 있으면 해당 정책을 편집해 교체한다.
 4. **SaySceneWorkerRole**에도 같은 방식으로 치환한 워커 정책을 넣고 `SaySceneJoinRead`로 저장한다.
 
-| 추가 정책 | 핵심 내용 | 적용 대상 |
-|---|---|---|
-| `SaySceneKarpenterAndCCM` | 공식 lifecycle·discovery 권한, 지정 WorkerRole에 대한 PassRole, CCM 노드 조회 | 기본 노드 역할 |
-| `SaySceneJoinRead` | `ssm:GetParameter`, `arn:aws:ssm:리전:계정:parameter/sayscene/kubeadm/*` | 워커 역할 |
+| 추가 정책                            | 핵심 내용                                                                | 적용 대상    |
+| -------------------------------- | -------------------------------------------------------------------- | -------- |
+| `SaySceneControlPlaneAdditional` | EC2 생성·조회·태그·종료, 프로파일 조회·PassRole, 가격·SSM 조회. 모두 `Resource: "*"`     | 기본 노드 역할 |
+| `SaySceneJoinRead`               | `ssm:GetParameter`, `arn:aws:ssm:리전:계정:parameter/sayscene/kubeadm/*` | 워커 역할    |
 
 워커 정책의 권한은 **파라미터 이름 경로**로 제한하며 SSM 태그 조건을 사용하지 않는다. 기본 `alias/aws/ssm` KMS 키를 기준으로 한다. 고객 관리 키를 선택하면 그 키 정책과 `kms:Decrypt`도 준비한다.
 
-기본 노드 정책의 공개 SSM 경로 읽기는 Karpenter의 AMI 발견용 기본 권한이다. 사용자의 `/sayscene/kubeadm/*` 가입 경로와는 다르다. 가입 파라미터는 사람이 콘솔에서 생성하므로 기본 노드에 `ssm:PutParameter` 권한을 부여하지 않는다.
+기본 노드 정책의 `ssm:GetParameter`는 AMI 발견용 공개 경로를 포함한 모든 파라미터를 대상으로 한다. 가입 경로도 IAM 리소스 범위에 포함되며 암호화 값의 복호화에는 해당 KMS 권한도 적용된다. 가입 파라미터는 사람이 콘솔에서 생성하므로 `ssm:PutParameter`는 추가하지 않는다.
 
 워커 프로파일을 미리 만들었으므로 Karpenter에 프로파일 생성·삭제 권한을 주지 않는다. EKS 조회·SQS interruption·Zonal Shift 정책은 이번 예제에서 사용하지 않는다. CCM은 노드 controller 두 개만 사용하는 정책이며 Service LB·route·EBS 전체 권한을 뜻하지 않는다.
 
@@ -308,37 +331,37 @@ cat > kubeadm-init.yaml <<EOF
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
 localAPIEndpoint:
-  advertiseAddress: "${CP_IP}"
+  advertiseAddress: "10.0.4.232"
   bindPort: 6443
 nodeRegistration:
-  name: "${CP_NODE_NAME}"
+  name: "ip-10-0-4-232.ap-northeast-2.compute.internal"
   criSocket: unix:///run/containerd/containerd.sock
   kubeletExtraArgs:
     - name: cloud-provider
       value: external
     - name: provider-id
-      value: "aws:///${CP_AZ}/${CP_INSTANCE_ID}"
+      value: "aws:///ap-northeast-2d/i-042a82bd6ddd4e20c"
     - name: node-ip
-      value: "${CP_IP}"
+      value: "10.0.4.232"
 ---
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
-clusterName: "${CLUSTER_NAME}"
-kubernetesVersion: "${K8S_VERSION}"
-controlPlaneEndpoint: "${CP_IP}:6443"
+clusterName: "sayscene"
+kubernetesVersion: "v1.35.0"
+controlPlaneEndpoint: "10.0.4.232:6443"
 apiServer:
   certSANs:
-    - "${CP_IP}"
-    - "${CP_NODE_NAME}"
-    - "${CP_EIP}"
+    - "10.0.4.232"
+    - "ip-10-0-4-232.ap-northeast-2.compute.internal"
+    - "3.35.66.49"
 networking:
-  serviceSubnet: "${SERVICE_CIDR}"
+  serviceSubnet: "10.96.0.0/12"
   dnsDomain: cluster.local
 ---
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 cgroupDriver: systemd
-maxPods: ${MAX_PODS}
+maxPods: 30
 systemReserved:
   cpu: 100m
   memory: 256Mi
@@ -396,6 +419,10 @@ helm version --short
 
 필요한 이유: containerd만으로는 파드에 VPC IP를 할당하고 통신을 연결하지 못한다. aws-node가 ENI·보조 IP를 관리하고 각 노드의 컨테이너 네트워크를 준비한다.
 
+**선행 확인:** 일반 AL2023 AMI에는 [OS 네트워크와 CNI의 충돌 방지 설정](./al2023-vpc-cni-network-prevention-guide.md)이 필요하다. 기본 노드와 워커 AMI 모두 대상이다. Pod IP가 호스트 ENI에 중복 등록되면 CoreDNS의 API·DNS 접근과 health probe가 실패할 수 있다. 현재 동작 중인 기본 노드의 전환은 별도 유지보수로 처리하며, 새 AMI ID만 바꿔도 기존 노드 설정이 수정되는 것은 아니다.
+
+이 예방 설정은 OS의 `systemd-networkd` 설정이므로 **CNI가 없는 제작용 EC2에도 적용할 수 있다.** AMI에 OS 설정을 저장한 뒤, CNI 자체는 아래 명령으로 클러스터에 설치한다.
+
 **기본 노드 셸**에서 고정 매니페스트를 적용한다.
 
 ```bash
@@ -407,7 +434,7 @@ curl -fsSLo aws-k8s-cni.yaml \
 
 kubectl apply -f aws-k8s-cni.yaml
 kubectl -n kube-system set env daemonset/aws-node \
-  CLUSTER_NAME="$CLUSTER_NAME" CLUSTER_ENDPOINT="https://${CP_IP}:6443"
+  CLUSTER_NAME="$CLUSTER_NAME" CLUSTER_ENDPOINT="https://10.0.4.232:6443"
 
 kubectl -n kube-system rollout status daemonset/aws-node --timeout=300s
 kubectl -n kube-system get pods -l k8s-app=aws-node -o wide
@@ -485,7 +512,7 @@ hostNetwork·기본 DNS·초기 taint toleration은 CoreDNS 준비 전에도 CCM
 
 ```bash
 kubectl wait --for=condition=Ready "node/$CP_NODE_NAME" --timeout=300s
-kubectl get node "$CP_NODE_NAME" \
+kubectl get node ip-10-0-4-232.ap-northeast-2.compute.internal \
   -o jsonpath='{.spec.providerID}{"\n"}{.spec.taints}{"\n"}'
 ```
 
@@ -512,7 +539,7 @@ sudo grep -A 4 -E '^(cgroupDriver|systemReserved|kubeReserved):' \
   /var/lib/kubelet/config.yaml
 ```
 
-`node-role.kubernetes.io/control-plane` **라벨은 유지**한다. CCM·Karpenter가 이 라벨로 기본 노드에 고정된다. 해제한 것은 같은 이름의 NoSchedule **taint**이며, 라벨과 다른 항목이다. `sayscene.io/node-role=base`는 일반 앱의 배치 선호도에 사용한다.
+`node-role.kubernetes.io/control-plane` **라벨은 유지**한다. CCM·LBC·Argo CD·Karpenter가 이 라벨로 기본 노드에 고정된다. 해제한 것은 같은 이름의 NoSchedule **taint**이며, 라벨과 다른 항목이다. `sayscene.io/node-role=base`는 일반 앱의 배치 선호도에 사용한다.
 
 4단계 예약량은 시스템 100m/256Mi + Kubernetes 프로세스 200m/256Mi인 예시다. 예약량은 파드에 노출되는 allocatable을 줄이며, CCM·Karpenter 등 **파드**의 requests는 이와 별도로 계산된다. 실제 컨트롤 플레인·앱 부하에 맞춰 여유를 늘리고 앱 requests/limits도 지정한다.
 
@@ -542,11 +569,11 @@ printf 'endpoint: %s:6443\nca-hash: %s\ntoken: %s\n' \
 
 **같은 리전 → Systems Manager → Parameter Store → 파라미터 생성**으로 각각 저장한다.
 
-| 이름 — 클러스터 이름이 sayscene인 예시 | 계층·데이터 형식 | 유형 | 값 |
-|---|---|---|---|
-| `/sayscene/kubeadm/endpoint` | Standard · text | String | 위 endpoint 출력. `https://` 없이 사설 IP:6443 |
-| `/sayscene/kubeadm/token` | Standard | SecureString | 위 token 출력. KMS 키는 기본 `alias/aws/ssm` |
-| `/sayscene/kubeadm/ca-hash` | Standard · text | String | 위 ca-hash 출력. `sha256:` 접두사 포함 |
+| 이름 — 클러스터 이름이 sayscene인 예시   | 계층·데이터 형식       | 유형           | 값                                       |
+| ---------------------------- | --------------- | ------------ | --------------------------------------- |
+| `/sayscene/kubeadm/endpoint` | Standard · text | String       | 위 endpoint 출력. `https://` 없이 사설 IP:6443 |
+| `/sayscene/kubeadm/token`    | Standard        | SecureString | 위 token 출력. KMS 키는 기본 `alias/aws/ssm`   |
+| `/sayscene/kubeadm/ca-hash`  | Standard · text | String       | 위 ca-hash 출력. `sha256:` 접두사 포함          |
 
 기존 파라미터가 있으면 새로 중복 생성하지 않고 해당 항목의 **편집**에서 값을 갱신한다. endpoint·ca-hash의 데이터 형식은 `aws:ec2:image`가 아닌 일반 `text`다. SecureString은 암호화용 KMS 키를 선택한다.
 
@@ -566,7 +593,16 @@ unset JOIN_TOKEN CA_HASH
 
 필요한 이유: AMI는 공통 프로그램만 제공한다. 새 EC2의 실제 이름·IP·providerID와 현재 토큰을 부팅 때 결합해야 각 워커가 고유 신원으로 가입한다.
 
-**기본 노드 셸**에서 파일만 만든다. 바깥 `<<'EOF'` 따옴표를 유지해야 워커용 변수가 현재 기본 노드에서 치환되지 않는다. 파일을 기본 노드에서 직접 실행하지 않는다.
+**기본 노드 셸**에서 아래 블록을 그대로 실행해 파일만 만든다. `settings.env`를 읽거나 미리 `export`할 필요는 없다. 스크립트 상단에 필요한 값을 직접 적고, 새 노드마다 달라지는 정보는 부팅 시 조회한다. 바깥 `<<'EOF'` 따옴표를 유지하고 파일을 기본 노드에서 직접 실행하지 않는다.
+
+| 스크립트 상단 입력 | 현재 예시 | 확인할 연결 대상 |
+|---|---|---|
+| `CLUSTER_NAME` | `sayscene` | 9단계 SSM 이름의 `/sayscene/kubeadm/*` 및 워커 IAM 경로 |
+| `EXPECTED_REGION` | `ap-northeast-2` | SSM을 저장하고 워커를 생성하는 리전 |
+| `MAX_PODS` | `20` | 13단계 NodeClass 및 실제 kubelet의 maxPods |
+| `KARPENTER_MANAGED` | `true` | Karpenter 생성 워커. 11단계 수동 검증 파일에서는 `false` |
+
+아래 예시가 실제 값과 다르면 스크립트 상단의 문자열만 수정한다. 기본 노드에서 설정한 환경변수는 새 워커에 전달되지 않으며, 이 스크립트는 그 환경변수에 의존하지 않는다.
 
 ```bash
 cat > worker-userdata.sh <<'EOF'
@@ -574,10 +610,14 @@ cat > worker-userdata.sh <<'EOF'
 set -euo pipefail
 umask 077
 
-CLUSTER_NAME="__CLUSTER_NAME__"
-EXPECTED_REGION="__AWS_REGION__"
-MAX_PODS="__MAX_PODS__"
+CLUSTER_NAME="sayscene"
+EXPECTED_REGION="ap-northeast-2"
+MAX_PODS="30"
 KARPENTER_MANAGED=true
+
+[[ "$CLUSTER_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]
+[[ "$EXPECTED_REGION" =~ ^[a-z0-9-]+$ ]]
+[[ "$MAX_PODS" =~ ^[1-9][0-9]*$ ]]
 
 if [[ -s /etc/kubernetes/kubelet.conf ]]; then
   echo "이미 가입한 노드입니다. 자동 재가입을 생략합니다."
@@ -657,44 +697,24 @@ kubeadm join --config "$JOIN_FILE"
 unset JOIN_TOKEN
 EOF
 
-python3 - <<'PY'
-import os
-import re
-from pathlib import Path
-values = {
-    "__CLUSTER_NAME__": os.environ["CLUSTER_NAME"],
-    "__AWS_REGION__": os.environ["AWS_REGION"],
-    "__MAX_PODS__": os.environ["MAX_PODS"],
-}
-if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", values["__CLUSTER_NAME__"]):
-    raise SystemExit("클러스터 이름 오류")
-if not re.fullmatch(r"[a-z0-9-]+", values["__AWS_REGION__"]):
-    raise SystemExit("리전 오류")
-if not values["__MAX_PODS__"].isdigit():
-    raise SystemExit("MAX_PODS 오류")
-path = Path("worker-userdata.sh")
-body = path.read_text()
-for key, value in values.items():
-    body = body.replace(key, value)
-path.write_text(body)
-PY
-
 bash -n worker-userdata.sh
 wc -c worker-userdata.sh
 ```
+
+스크립트 안의 `$NODE_IP`·`$NODE_NAME`·`$AWS_REGION` 등은 IMDSv2 조회 결과를 담는 **내부 변수**다. `$JOIN_TOKEN`·`$API_ENDPOINT`·`$CA_HASH`도 스크립트가 SSM에서 조회해 설정하므로 외부 환경변수가 없어도 동작한다. AWS CLI는 워커의 EC2 역할을 사용하며 별도 로그인·액세스 키 입력은 필요 없다.
 
 userData 원문은 16KB 안에 있어야 한다. 토큰·정적 키를 파일에 넣지 않고, 조회 후 만드는 임시 파일은 root만 읽고 종료 시 삭제한다. `set -x`나 토큰 출력은 추가하지 않는다.
 
 AMI의 `/etc/sysconfig/kubelet`에 있는 ECR provider 설정은 덮어쓰지 않는다. maxPods는 NodeClass와 실제 kubelet에 동일하게 반영한다.
 
-| 등록 taint | 처리 주체 |
-|---|---|
-| `node.cloudprovider.kubernetes.io/uninitialized` | CCM |
-| `karpenter.sh/unregistered` | Karpenter |
+| 등록 taint                                         | 처리 주체     |
+| ------------------------------------------------ | --------- |
+| `node.cloudprovider.kubernetes.io/uninitialized` | CCM       |
+| `karpenter.sh/unregistered`                      | Karpenter |
 
 `kubelet.conf` 생성 뒤 가입이 일부 실패했다면 단순 재실행으로 복구된다고 가정하지 않는다. 로그를 확인하고 실패한 테스트 워커를 교체해 새 부팅으로 검증한다.
 
-**통과 기준:** Bash 문법 통과, 16KB 미만, 토큰·CP IP가 고정되지 않은 파일.
+**통과 기준:** Bash 문법 통과, 16KB 미만, 외부 환경변수 치환 불필요, 토큰·기본 노드 사설 IP가 고정되지 않은 파일. 이 파일을 11단계 수동 실행용으로 변환하거나 13단계 NodeClass의 `spec.userData`에 그대로 삽입한다.
 
 ## 11. 선택: 콘솔에서 수동 워커를 띄워 가입 경로를 검증한다
 
@@ -711,19 +731,19 @@ cat worker-manual-userdata.sh
 
 **AWS 콘솔 → EC2 → 인스턴스 시작**에서 설정한다.
 
-| 항목 | 입력 |
-|---|---|
-| 이름 | `sayscene-manual-test` |
-| AMI | 내 AMI → 앞에서 만든 CPU Custom AMI ID |
-| 유형 | `m6i.large` |
-| 키 페어 | SSH가 필요하면 본인의 키 페어. Session Manager 사용 시 그 접속 조건 준비 |
-| 네트워크 | 기존 VPC·워커 후보 서브넷·공통 노드 SG |
-| 퍼블릭 IP | 자동 할당 활성화. 워커에는 별도 EIP 불필요 |
-| 스토리지 | 원본 AMI 크기 이상, 예시 40GiB gp3 |
-| 고급 세부 정보 → IAM 인스턴스 프로파일 | 실제 워커 프로파일. 신규 콘솔 구성은 `SaySceneWorkerRole` |
-| 고급 세부 정보 → 메타데이터 | 메타데이터 접근 활성, IMDSv2 필수, hop limit 1 |
-| 고급 세부 정보 → 사용자 데이터 | 위 `worker-manual-userdata.sh` 전체를 평문으로 붙여 넣음. 이미 base64 인코딩한 데이터 옵션은 선택하지 않음 |
-| 태그 추가 | 대상 인스턴스, 키 `kubernetes.io/cluster/sayscene`, 값 `owned` |
+| 항목                       | 입력                                                                           |
+| ------------------------ | ---------------------------------------------------------------------------- |
+| 이름                       | `sayscene-manual-test`                                                       |
+| AMI                      | 내 AMI → 앞에서 만든 CPU Custom AMI ID                                             |
+| 유형                       | `m6i.large`                                                                  |
+| 키 페어                     | SSH가 필요하면 본인의 키 페어. Session Manager 사용 시 그 접속 조건 준비                          |
+| 네트워크                     | 기존 VPC·워커 후보 서브넷·공통 노드 SG                                                    |
+| 퍼블릭 IP                   | 자동 할당 활성화. 워커에는 별도 EIP 불필요                                                   |
+| 스토리지                     | 원본 AMI 크기 이상, 예시 40GiB gp3                                                   |
+| 고급 세부 정보 → IAM 인스턴스 프로파일 | 실제 워커 프로파일. 신규 콘솔 구성은 `SaySceneWorkerRole`                                   |
+| 고급 세부 정보 → 메타데이터         | 메타데이터 접근 활성, IMDSv2 필수, hop limit 1                                          |
+| 고급 세부 정보 → 사용자 데이터       | 위 `worker-manual-userdata.sh` 전체를 평문으로 붙여 넣음. 이미 base64 인코딩한 데이터 옵션은 선택하지 않음 |
+| 태그 추가                    | 대상 인스턴스, 키 `kubernetes.io/cluster/sayscene`, 값 `owned`                       |
 
 인스턴스 1대를 시작하고 ID를 기록한다. 수동 노드에 `karpenter.sh/nodepool` 등 소유권 태그는 추가하지 않는다.
 
@@ -747,17 +767,308 @@ kubectl get nodes -o wide
 
 **통과 기준:** 수동 워커 Ready·고유 providerID 확인, 검증 후 EC2 종료 및 CCM의 Node 정리 확인.
 
-## 12. Karpenter controller·CRD를 설치한다
+## 12. 먼저 Argo CD를 Ingress로 공개하고 웹 콘솔에서 앱을 배포한다
 
-필요한 이유: Karpenter는 배치할 수 없는 파드 수요를 계산해 EC2를 생성·정리한다. 기본 노드에 두어 워커가 0대여도 다시 확장할 수 있게 한다.
+필요한 이유: 먼저 LBC·Argo CD·Ingress를 준비해야 브라우저에서 앱을 배포할 수 있다. 이 단계에서는 Argo CD 로그인과 일반 앱 배포까지 진행하고, Karpenter 설치는 뒤로 미룬다.
 
-**기본 노드 셸**에서 실행한다. Kubernetes 1.35는 Karpenter 1.9 이상이 필요하고 이 가이드는 1.15.0을 사용한다.
+### 12-1. AWS Load Balancer Controller를 먼저 설치한다
+
+필요한 이유: 이후 앱·Argo CD를 ALB로 공개할 때 사용할 controller를 준비한다. 설치 자체가 ALB를 생성하지는 않으며, 여기서는 기본 노드 IAM 역할로 AWS API를 호출한다.
+
+**AWS 콘솔에서 준비:**
+
+1. [LBC v3.6.1 공식 IAM JSON](https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v3.6.1/docs/install/iam_policy.json)을 열고 전체 내용을 복사한다. **IAM → 정책 → 정책 생성 → JSON**에 붙여 넣고 `AWSLoadBalancerControllerIAMPolicy`로 저장한다.
+2. **IAM → 역할 → SaySceneControlPlaneRole → 권한 추가 → 정책 연결**에서 위 정책을 연결한다. 기존 Karpenter·CCM 정책에 합치지 않고 LBC용 정책으로 구분한다. 확장 워커 역할에는 연결하지 않는다.
+3. **VPC → VPC**에서 기본 노드가 속한 VPC ID를 확인한다. 아래 `vpc-REPLACE_VPC_ID`에 입력한다. `vpc-076fc1434b446f1ae`
+4. 실제 internet-facing ALB를 만들 때 사용할 public subnet에 **`kubernetes.io/role/elb=1`** 태그를 붙인다. LBC의 서브넷 선택을 명확히 하는 태그이며 `karpenter.sh/discovery=sayscene`과 목적이 다르다. 일반 ALB에는 **서로 다른 AZ의 public subnet 두 개 이상**, 각 서브넷에 가용 IP 최소 8개가 필요하다. 지금은 서브넷이 하나여도 controller 설치를 진행할 수 있다.
+5. 공통 노드 SG의 자기 참조 **모든 트래픽**을 유지한다. API 서버 → LBC webhook의 TCP **9443** 통신도 필요하며 인터넷에 이 포트를 공개하지 않는다.
+
+**기본 노드의 IMDSv2 hop limit은 2로 설정한다.** LBC는 일반 Pod 네트워크에서 노드 IAM 자격 증명을 가져오기 때문이다. `region`·`vpcId`를 명시해도 자격 증명 조회는 필요하다. Argo CD 자체에는 IMDS 접근이 필요하지 않다.
+
+기존 EC2의 hop limit 변경은 [AWS 공식 문서상 CLI·SDK로 지원](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-IMDS-existing-instances.html#modify-PUT-response-hop-limit)하므로, 이 작업만 **AWS 콘솔 오른쪽 위 CloudShell**에서 실행한다. 인스턴스 ID는 EC2 콘솔에서 확인한 실제 기본 노드 ID로 바꾼다. 기본 노드 역할에 메타데이터 수정 권한을 추가할 필요는 없다. CloudShell 로그인 사용자에게 해당 권한이 있어야 한다.
 
 ```bash
-. ./settings.env
-. ./cluster-runtime.env
+aws ec2 modify-instance-metadata-options \
+  --region ap-northeast-2 \
+  --instance-id i-REPLACE_BASE_NODE \
+  --http-endpoint enabled \
+  --http-tokens required \
+  --http-put-response-hop-limit 2
 
-cat > karpenter-values.yaml <<EOF
+aws ec2 describe-instances \
+  --region ap-northeast-2 \
+  --instance-ids i-REPLACE_BASE_NODE \
+  --query 'Reservations[0].Instances[0].MetadataOptions'
+```
+
+`State=applied`, `HttpTokens=required`, `HttpPutResponseHopLimit=2`를 확인한다. 변경은 재부팅 없이 적용된다. **같은 기본 노드의 Argo CD·일반 앱 Pod도 노드 IAM 역할에 접근할 수 있다.** 그 역할에는 Karpenter의 EC2 생성·종료 권한도 있으므로 hop 2를 파드별 권한 격리로 해석하면 안 된다. 현재의 신뢰하는 앱용 PoC 기준이며, 운영에서 격리가 필요하면 controller별 신원·IMDS 접근 제어를 별도로 설계한다. **13단계 확장 워커의 hop limit 1은 유지한다.**
+
+이후 **기본 노드 셸**에서 실행한다. 아래 YAML은 외부 환경변수를 사용하지 않는다. 다른 클러스터라면 이름·리전도 수정한다.
+
+```bash
+cd "$HOME/sayscene-bootstrap"
+
+cat > aws-load-balancer-controller-values.yaml <<'EOF'
+clusterName: sayscene
+region: ap-northeast-2
+vpcId: vpc-REPLACE_VPC_ID
+replicaCount: 1
+hostNetwork: false
+nodeSelector:
+  node-role.kubernetes.io/control-plane: ""
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+serviceAccount:
+  create: true
+  name: aws-load-balancer-controller
+EOF
+```
+
+`aws-load-balancer-controller-values.yaml`의 VPC ID를 수정한 뒤 설치한다. `eks`는 공식 Helm 저장소의 별칭이며 kubeadm에서도 사용한다. 최초 Helm 설치에서 CRD·webhook 인증서를 함께 준비하므로 별도 cert-manager 설치는 필요 없다.
+
+```bash
+helm repo add eks https://aws.github.io/eks-charts
+helm repo update eks
+helm show chart eks/aws-load-balancer-controller --version 3.6.1
+
+helm upgrade --install aws-load-balancer-controller \
+  eks/aws-load-balancer-controller \
+  --namespace kube-system --version 3.6.1 \
+  --values aws-load-balancer-controller-values.yaml --wait --timeout 5m
+
+kubectl -n kube-system rollout status \
+  deployment/aws-load-balancer-controller --timeout=300s
+kubectl -n kube-system logs deployment/aws-load-balancer-controller --tail=80
+```
+
+**통과 기준:** LBC가 기본 노드에서 Ready이며 IMDS·AWS 인증·권한 오류가 없다. 아직 Ingress/Service를 만들지 않았으므로 ALB가 없는 상태가 정상이다.
+
+### 12-2. Argo CD를 설치하고 ALB·CloudFront로 접속한다
+
+필요한 이유: 아직 Argo CD가 없으므로 최초 한 번은 직접 설치해야 한다. CNI·CoreDNS가 정상인 상태에서 설치하고 Ingress 도메인으로 접속한 뒤, 이후 앱의 생성·배포·동기화는 웹 콘솔에서 진행한다.
+
+**기본 노드 셸**에서 실행한다. Argo CD v3.5 계열은 Kubernetes 1.35를 공식 테스트 대상으로 명시한다. 아래는 v3.5.5의 단일 인스턴스 구성이다.
+
+```bash
+kubectl -n kube-system rollout status deployment/coredns --timeout=300s
+kubectl describe node -l node-role.kubernetes.io/control-plane
+
+kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -n argocd --server-side \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/v3.5.5/manifests/install.yaml
+
+# Argo CD의 Deployment·StatefulSet도 기본 노드에 고정한다.
+kubectl -n argocd get deployment,statefulset -o name | while read -r resource; do
+  kubectl -n argocd patch "$resource" --type merge \
+    -p '{"spec":{"template":{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""}}}}}'
+done
+
+kubectl -n argocd rollout status deployment/argocd-server --timeout=300s
+kubectl -n argocd rollout status deployment/argocd-repo-server --timeout=300s
+kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
+kubectl -n argocd get pods -o wide
+```
+
+Argo CD·LBC·Karpenter도 기본 노드의 메모리·CPU·Pod 수를 소비한다. `Pending`이면 `kubectl describe pod -n argocd POD_NAME`의 이벤트를 확인하고 기본 노드 용량부터 확보한다. **Karpenter 설치 전에는 자동 확장이 해결해 주지 않는다.** Argo CD 매니페스트를 나중에 다시 적용·업그레이드하면 위 배치 설정도 함께 유지한다.
+
+초기 계정은 `admin`이다. **기본 노드 셸**에서 초기 암호를 확인한다.
+
+```bash
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath='{.data.password}' | base64 -d
+printf '\n'
+```
+
+#### ALB Ingress·CloudFront 연결
+
+필요한 이유: LBC 설치 후 Ingress를 생성하면 ALB로 Argo CD를 공개할 수 있다. CloudFront는 별도 AWS 자원이므로 **Ingress YAML만으로 생성되지 않으며**, 콘솔에서 ALB를 origin으로 연결한다.
+
+접속 주소는 **`https://기존-CloudFront-도메인/argocd/`**다. 예를 들어 `https://d111111abcdef8.cloudfront.net/argocd/`로 접속한다. 별도 Argo CD 전용 도메인이나 포트 포워딩은 필요 없다. 기존 앱과 같은 CloudFront 배포에서 `/argocd` 경로만 분리한다.
+
+통신은 **브라우저 ─HTTPS→ CloudFront ─HTTP→ ALB ─HTTP→ Argo CD**이며 TLS는 CloudFront에서 종료한다. ALB용 인증서는 발급하지 않는다. CloudFront 이후 구간은 암호화되지 않으며, 아래 prefix list·검증 헤더로 접근을 제한한다.
+
+**AWS 콘솔에서 준비:**
+
+1. 12-1단계의 **서로 다른 AZ에 있는 public subnet 두 개**, `kubernetes.io/role/elb=1` 태그·가용 IP를 확인한다. private subnet이나 기본 노드 EIP를 ALB에 연결할 필요는 없다.
+2. **CloudFront → 현재 사용할 배포 → General**에서 **Distribution domain name**을 확인한다. 예: `d111111abcdef8.cloudfront.net`. 이 기본 도메인은 CloudFront 기본 HTTPS 인증서를 사용하므로 **별도 ACM 발급·DNS 설정이 필요 없다.** 기존 사용자 도메인을 사용한다면 이미 연결한 도메인·인증서를 그대로 사용한다.
+3. **VPC → 관리형 접두사 목록**에서 서울 리전의 AWS 관리 목록 **`com.amazonaws.global.cloudfront.origin-facing`**을 찾아 `pl-...` ID를 기록한다. 아래 annotation은 **LBC가 만드는 ALB SG**에 이 목록만 허용한다. 공통 노드 SG를 이 목록으로 바꾸는 작업이 아니다.
+4. 충분히 긴 임의의 `X-Origin-Verify` 값을 준비한다. 아래 YAML과 CloudFront origin의 사용자 지정 헤더에 같은 값을 넣는다. 이 값이 담긴 YAML은 공개 저장소·공유 로그에 노출하지 않는다.
+
+**기본 노드 셸**에서 HTTP 모드와 `/argocd` 경로를 설정한다. `REPLACE_CLOUDFRONT_DOMAIN`을 위에서 확인한 실제 도메인으로 바꾼다. `rootpath`는 UI·API 경로를 함께 변경하며, `basehref`도 같은 값으로 명시한다. ConfigMap 변경 후 server를 재시작한다.
+
+```bash
+kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge \
+  -p '{"data":{"server.insecure":"true","server.rootpath":"/argocd","server.basehref":"/argocd"}}'
+kubectl -n argocd patch configmap argocd-cm --type merge \
+  -p '{"data":{"url":"https://REPLACE_CLOUDFRONT_DOMAIN/argocd"}}'
+kubectl -n argocd rollout restart deployment/argocd-server
+kubectl -n argocd rollout status deployment/argocd-server --timeout=300s
+```
+
+다음 파일의 prefix list ID·검증 헤더의 `REPLACE` 값을 실제 값으로 수정한 뒤 적용한다. `host` 조건은 생략하므로 CloudFront 기본 도메인과 기존 사용자 도메인 모두 사용할 수 있다. `argocd-server` Service의 **80** 포트는 Pod의 **8080** 포트로 연결된다.
+
+```bash
+cat > argocd-ingress.yaml <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd
+  namespace: argocd
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    alb.ingress.kubernetes.io/security-group-prefix-lists: pl-REPLACE_CLOUDFRONT_PREFIX_LIST
+    alb.ingress.kubernetes.io/backend-protocol: HTTP
+    alb.ingress.kubernetes.io/backend-protocol-version: HTTP1
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/healthcheck-path: /argocd/healthz
+    alb.ingress.kubernetes.io/success-codes: '200'
+    alb.ingress.kubernetes.io/conditions.argocd-server: >-
+      [{"field":"http-header","httpHeaderConfig":{"httpHeaderName":"X-Origin-Verify","values":["REPLACE_RANDOM_ORIGIN_SECRET"]}}]
+    alb.ingress.kubernetes.io/actions.deny: >-
+      {"type":"fixed-response","fixedResponseConfig":{"contentType":"text/plain","statusCode":"403","messageBody":"Forbidden"}}
+spec:
+  ingressClassName: alb
+  defaultBackend:
+    service:
+      name: deny
+      port:
+        name: use-annotation
+  rules:
+    - http:
+        paths:
+          - path: /argocd
+            pathType: Prefix
+            backend:
+              service:
+                name: argocd-server
+                port:
+                  number: 80
+EOF
+```
+
+```bash
+kubectl apply --dry-run=server -f argocd-ingress.yaml
+kubectl apply -f argocd-ingress.yaml
+kubectl -n argocd get ingress argocd -w
+```
+
+`ADDRESS`에 ALB DNS 이름이 표시되면 `Ctrl+C`로 조회를 종료한다.
+
+**CloudFront 콘솔 → 기존 배포 → Origins → Create origin**에서 ALB origin을 추가한다. 이미 같은 ALB origin을 사용 중이면 재사용하고 검증 헤더 값을 일치시킨다.
+
+| 항목                   | 설정                                                     |
+| -------------------- | ------------------------------------------------------ |
+| Origin domain        | 위에서 확인한 **ALB DNS 이름**. `https://`·경로·기본 노드 EIP를 넣지 않음 |
+| Origin protocol      | **HTTP only**, 포트 **80**                               |
+| Origin path          | **비워 둠**. `/argocd`를 입력하면 요청 경로가 중복될 수 있음              |
+| Origin custom header | `X-Origin-Verify` = YAML과 동일한 임의 값                     |
+|                      |                                                        |
+
+이어서 **Behaviors → Create behavior**에서 아래 두 경로를 **각각 생성**한다. `/argocd/*`만으로는 `/argocd` 요청이 포함되지 않는다.
+
+| Path pattern | Origin       |
+| ------------ | ------------ |
+| `/argocd`    | 위 ALB origin |
+| `/argocd/*`  | 위 ALB origin |
+
+두 behavior에 다음 설정을 동일하게 적용한다.
+
+| 항목 | 설정 |
+|---|---|
+| Viewer protocol policy | **Redirect HTTP to HTTPS** |
+| Allowed HTTP methods | **GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE** |
+| Cache policy | **Managed-CachingDisabled** |
+| Origin request policy | **Managed-AllViewer**. `Host`·인증 헤더·쿠키·쿼리를 origin으로 전달 |
+| Function associations / Lambda@Edge | URI를 변경하는 함수는 **연결하지 않음** |
+
+두 behavior는 더 넓게 일치하는 기존 규칙보다 앞에 둔다. **기존 앱의 Default behavior `*`·S3 origin·기본 도메인 설정은 유지**한다. 새 `/argocd` behavior에는 SPA용 `index.html` 재작성 함수를 연결하지 않으며, CloudFront 오류 응답을 배포 전체에서 `index.html`로 바꾸는 설정도 넣지 않는다.
+
+**경로는 그대로 전달한다.** 브라우저의 `/argocd/...`가 CloudFront·ALB를 거쳐 Argo CD까지 유지되어야 한다. ALB의 prefix 제거 rewrite나 CloudFront의 Origin path 추가는 필요 없다. Argo CD가 자체적으로 `/argocd` 아래의 UI·API를 처리한다.
+
+**검증:** CloudFront 설정 배포가 끝나면 브라우저로 **`https://실제-CloudFront-도메인/argocd/`**에 접속해 초기 계정으로 로그인하고 admin 암호를 변경한다. 새로고침·로그인·앱 목록 표시가 정상이고, EC2 콘솔의 대상 그룹이 `healthy`인지 확인한다. ALB health check는 `/argocd/healthz`를 사용하며 기존 kubelet의 `/healthz` probe는 유지해도 된다. ALB 직접 접근은 prefix list·헤더 조건으로 제한한다.
+
+ALB는 **HTTP 80 listener만** 사용한다. HTTPS 리다이렉트는 CloudFront가 처리하므로 Ingress에 `certificate-arn`·`ssl-redirect`를 추가하지 않는다. prefix list는 모든 CloudFront 배포가 공유하므로 임의 헤더로 자신의 배포도 구분한다. LBC가 ALB→Pod용 노드 SG 규칙을 관리하며, ALB SG·listener를 수정할 때는 콘솔 직접 편집 대신 이 Ingress를 수정한다.
+
+**기존 루트 경로 또는 HTTPS backend로 설치했다면:** Argo CD를 다시 설치하지 않고 위 ConfigMap·Ingress만 수정하고 server를 재시작한다. CloudFront origin을 **HTTP only / 80**으로 맞춘 뒤 두 behavior를 추가한다. 변경이 모두 반영되기 전에는 일시적으로 접속이 실패할 수 있다.
+
+사용자 마이크 기능의 HTTPS 조건도 **실제 프런트엔드 페이지를 브라우저에 HTTPS로 제공하는지**를 기준으로 한다. 앱의 API 요청은 `https://서비스도메인/api/...`처럼 CloudFront를 경유하게 하고 브라우저에서 ALB HTTP 주소를 직접 호출하지 않는다. `/argocd`는 관리 화면이며 기존 앱의 `/`·`/api/*` 경로와 나누어 사용한다.
+
+**통과 기준:** Argo CD 파드가 기본 노드에서 정상 실행되고 ALB 대상 그룹이 healthy이며, 외부 브라우저의 **`https://실제-CloudFront-도메인/argocd/`**로 로그인할 수 있다. Argo CD 업그레이드 시에도 HTTP·rootpath·basehref 설정을 유지한다.
+
+**현재 목표가 Argo CD 공개라면 여기까지 진행한다.** 아직 Karpenter나 Karpenter Application을 만들 필요는 없다. 이후에는 아래 웹 콘솔 절차로 일반 앱부터 배포한다.
+
+### 12-3. 웹 콘솔에서 저장소를 연결하고 일반 앱을 배포한다
+
+필요한 이유: Application은 “어떤 소스를 어느 클러스터에 배포할지” 연결하는 설정이다. 웹 콘솔의 생성 양식으로 등록할 수 있으므로 Application YAML 파일을 직접 작성할 필요가 없다.
+
+1. **Argo CD → Settings → Repositories → CONNECT REPO**를 연다. Git 저장소 URL을 입력하고, 비공개 저장소라면 HTTPS 토큰 또는 SSH 키 방식으로 인증해 **Connection Status = Successful**을 확인한다. 이미 연결했다면 재사용한다.
+2. **Applications → NEW APP**에서 아래 항목을 입력한다. `apps/my-app`은 실제 배포 매니페스트나 차트가 있는 경로로 바꾼다.
+
+| 웹 콘솔 항목               | 입력 기준                                            |
+| --------------------- | ------------------------------------------------ |
+| Application Name      | 앱 이름. 예: `my-app`                                |
+| Project Name          | `default`                                        |
+| Sync Policy           | 처음에는 **Manual**                                  |
+| Repository URL        | 앞에서 연결한 앱 Git 저장소                                |
+| Revision              | 배포할 브랜치·태그. 예: `main`                            |
+| Path                  | 예: `apps/my-app`. 저장소 안의 실제 앱 경로                 |
+| Destination Cluster   | `https://kubernetes.default.svc` 또는 `in-cluster` |
+| Destination Namespace | 앱 namespace. 예: `my-app`                         |
+| Sync Options          | namespace가 아직 없으면 **Auto-Create Namespace** 선택   |
+
+3. **CREATE**로 Application을 생성한다. 앱 상세 화면에서 **DIFF**로 변경 내용을 확인하고 **SYNC → SYNCHRONIZE**로 배포한다. 최초에는 Prune·Force를 선택하지 않는다.
+4. **Synced·Healthy**, 리소스 트리의 Deployment·Pod 상태를 확인한다. Pod의 **LOGS·EVENTS**도 웹 콘솔에서 확인할 수 있다.
+5. 이후에는 Git의 앱 설정을 바꾸고 웹 콘솔에서 **REFRESH → DIFF → SYNC**한다. 이 단계에서 Karpenter가 없어도 앱을 배포할 수 있다. 다만 `Pending`의 원인이 자원 부족이면 현재 노드 용량을 확보하거나, 아래 Karpenter 설치를 진행해야 한다.
+
+## 이후 선택: 앱 배포 후 Karpenter를 Argo CD 웹 콘솔로 설치한다
+
+필요한 이유: Karpenter는 앱 배포 자체에 필수가 아니라, 현재 노드로 수용하지 못하는 파드를 위해 EC2 워커를 추가하는 구성요소다. 일반 앱을 배포한 뒤 확장이 필요해지는 시점에 설치한다.
+
+9~11단계의 워커 AMI·SSM·IAM·가입 준비를 확인한 뒤 시작한다. **아래 Application도 파일을 작성하지 않고 Argo CD 웹 콘솔에서 생성한다.**
+
+기본 노드에는 아래 Karpenter controller의 requests인 **CPU 500m·메모리 512Mi와 Pod 슬롯**을 확보한다. 앱을 먼저 배포해도 이 여유는 남겨 두어야 controller 자체가 실행되고 워커를 확장할 수 있다.
+
+### K-1. 웹 콘솔에서 공개 OCI Helm 저장소를 연결한다
+
+필요한 이유: Argo CD가 Karpenter의 공개 차트를 직접 읽게 한다. 개인 ECR 로그인이나 Application YAML 작성은 필요 없다.
+
+**Settings → Repositories → CONNECT REPO → VIA HTTPS**에서 아래와 같이 입력하고 **CONNECT**를 누른다.
+
+| 항목 | 입력값 |
+|---|---|
+| Type | `helm` |
+| Name | `karpenter` |
+| Repository URL | `public.ecr.aws/karpenter` — `oci://`를 붙이지 않음 |
+| Enable OCI | 선택 |
+| Username / Password | 공개 저장소이므로 비워 둠 |
+
+**Connection Status = Successful**을 확인한다. 이후 같은 저장소를 재사용한다.
+
+### K-2. 웹 콘솔에서 Karpenter Application을 생성·설치한다
+
+필요한 이유: Karpenter controller와 차트에 포함된 CRD를 하나의 Application으로 설치한다. Argo CD가 Helm 차트를 렌더링해 적용하므로 별도 CRD Application이나 `skipCrds` 설정이 필요 없다.
+
+**Applications → NEW APP**에서 다음을 입력한다. 아래 절차는 아직 Karpenter·CRD를 설치하지 않은 최초 설치 기준이다. 기존에 별도 `karpenter-crd` Application을 만들었다면 동일 CRD를 두 Application에서 동시에 관리하지 않는다.
+
+| 항목 | 입력값 |
+|---|---|
+| Application Name | `karpenter` |
+| Project Name | `default` |
+| Sync Policy | **Manual** |
+| Sync Options | **Server-Side Apply** 선택. 큰 CRD의 annotation 크기 제한을 피하기 위한 설정 |
+| Repository URL | K-1에서 연결한 `public.ecr.aws/karpenter` |
+| Chart | `karpenter` |
+| Version / Revision | `1.15.0` |
+| Destination Cluster | `https://kubernetes.default.svc` 또는 `in-cluster` |
+| Destination Namespace | `kube-system` |
+
+소스를 선택하면 나타나는 **HELM → VALUES** 입력란에 아래 내용을 그대로 붙여 넣는다. **Application YAML이 아니라 화면에 입력할 Helm 설정값**이다. 파일을 만들거나 `kubectl apply`를 실행하지 않는다. 클러스터 이름·리전·사설 API 주소가 다르면 해당 값만 바꾼다.
+
+```yaml
 replicas: 1
 hostNetwork: true
 dnsPolicy: ClusterFirstWithHostNet
@@ -772,15 +1083,15 @@ tolerations:
     operator: Exists
 topologySpreadConstraints: []
 settings:
-  clusterName: ${CLUSTER_NAME}
-  clusterEndpoint: https://${CP_IP}:6443
+  clusterName: sayscene
+  clusterEndpoint: https://10.0.4.232:6443
   eksControlPlane: false
   enableZonalShift: false
   interruptionQueue: ""
 controller:
   env:
     - name: AWS_REGION
-      value: ${AWS_REGION}
+      value: ap-northeast-2
     - name: EKS_CONTROL_PLANE
       value: "false"
   resources:
@@ -789,45 +1100,24 @@ controller:
       memory: 512Mi
     limits:
       memory: 1Gi
-EOF
-
-helm show chart oci://public.ecr.aws/karpenter/karpenter \
-  --version "$KARPENTER_VERSION"
-
-helm template karpenter oci://public.ecr.aws/karpenter/karpenter \
-  --version "$KARPENTER_VERSION" --namespace kube-system \
-  --values karpenter-values.yaml > karpenter-rendered.yaml
-
-grep -nE 'image:|hostNetwork:|CLUSTER_ENDPOINT|CLUSTER_NAME|EKS_CONTROL_PLANE' \
-  karpenter-rendered.yaml
 ```
 
-OCI 패키지에서 렌더링된 controller 이미지가 의도한 버전인지 확인한다. 소스 chart에 오래된 기본 이미지가 남을 수 있으므로 이전 digest를 복사하지 않는다. 확인 항목은 실제 API 주소·`EKS_CONTROL_PLANE=false`·기본 노드 배치·hostNetwork다. chart의 기본 `karpenter.sh/nodepool DoesNotExist` affinity는 유지한다.
+1. **CREATE**로 Application을 만든다. 생성 후 설정을 바꿀 때도 Application 상세 화면의 **PARAMETERS → HELM → VALUES** 편집 기능을 사용한다.
+2. **DIFF/매니페스트**에서 controller 이미지 버전, 사설 API 주소, `EKS_CONTROL_PLANE="false"`가 한 번만 설정되는지, 기본 노드 selector·hostNetwork를 확인한다. chart의 기본 `karpenter.sh/nodepool DoesNotExist` affinity는 유지한다.
+3. **SYNC → SYNCHRONIZE**로 설치한다. Server-Side Apply가 설정되어 있는지 확인하고 Prune·Force는 선택하지 않는다. CRD를 제외하거나 일부 리소스만 선택하지 않고 전체를 동기화한다. Argo CD는 CRD를 먼저 적용하도록 리소스 종류에 따른 순서를 사용한다.
+4. 리소스 트리에서 controller Deployment·Pod가 기본 노드에서 정상 실행되는지 확인한다. Pod의 **LOGS**에서 반복적인 AWS 인증·권한 오류가 없어야 한다.
+5. 리소스 트리의 CRD 세 개를 열어 **실제 매니페스트(LIVE MANIFEST)의 `status.conditions`**에서 `Established=True`를 확인한다. 대상은 `nodepools.karpenter.sh`, `nodeclaims.karpenter.sh`, `ec2nodeclasses.karpenter.k8s.aws`다. 이 확인 후 13·14단계로 진행한다.
 
-```bash
-helm upgrade --install karpenter-crd \
-  oci://public.ecr.aws/karpenter/karpenter-crd \
-  --version "$KARPENTER_VERSION" --namespace kube-system --wait
+**통과 기준:** `karpenter` Application이 Synced이고 controller Deployment가 Healthy이며 CRD 세 개가 Established다. Karpenter는 기본 노드 IAM 역할을 사용하므로 확장 워커에 기본 노드의 높은 권한 역할을 붙이지 않는다.
 
-helm upgrade --install karpenter \
-  oci://public.ecr.aws/karpenter/karpenter \
-  --version "$KARPENTER_VERSION" --namespace kube-system --skip-crds \
-  --values karpenter-values.yaml --wait --timeout 5m
+이후 Karpenter 설정 변경도 웹 콘솔에서 **VALUES 수정 → DIFF → SYNC**로 처리한다. 같은 리소스를 별도의 Helm 설치나 다른 Application으로 중복 관리하지 않는다. 13·14단계의 NodeClass·NodePool도 Git에 준비한 뒤 웹 콘솔에서 별도 Application으로 연결한다. LBC는 현재의 Helm 관리 상태를 유지한다.
 
-kubectl -n kube-system get pods \
-  -l app.kubernetes.io/name=karpenter -o wide
-kubectl -n kube-system logs deployment/karpenter --tail=100
-```
 
-hostNetwork는 IMDS hop limit 1에서도 기본 노드 역할을 이용하기 위한 선택이다. 다른 호스트 프로세스·hostNetwork 파드도 해당 역할에 접근할 수 있는 한계가 있다. 기본 노드 역할을 확장 워커에 부착하지 않는다.
-
-**통과 기준:** controller가 기본 노드에서 실행되고 반복적인 인증·AWS API 오류가 없다. CRD와 controller 버전은 일치한다.
-
-## 13. CPU EC2NodeClass를 생성한다
+## 13. 이후 확장용 CPU EC2NodeClass 파일을 준비한다
 
 필요한 이유: NodeClass는 EC2의 AMI·네트워크·IAM·디스크·부트스트랩을 정의한다. Custom AMI에서는 Karpenter가 가입 스크립트를 자동 보완하지 않으므로 전체 userData를 연결한다.
 
-**기본 노드 셸**에서 실행한다. 루트 장치와 크기는 0단계에서 AMI 콘솔을 보고 `settings.env`에 기록한 값을 사용한다. `ROOT_DEVICE`를 추측하지 않고 원본 AMI의 루트 매핑과 일치시킨다.
+**Karpenter를 나중에 설치한 뒤 진행한다.** AMI·IAM·userData를 결합하는 파일 생성만 기본 노드 셸에서 처리하고, 실제 배포는 14단계에서 Argo CD 웹 콘솔로 진행한다. 루트 장치와 크기는 0단계의 `settings.env` 값을 사용한다. `ROOT_DEVICE`는 원본 AMI의 루트 매핑과 일치시킨다.
 
 ```bash
 . ./settings.env
@@ -875,23 +1165,19 @@ EOF
 printf '  userData: |\n' >> ec2nodeclass-general.yaml
 sed 's/^/    /' worker-userdata.sh >> ec2nodeclass-general.yaml
 
-kubectl apply --dry-run=server -f ec2nodeclass-general.yaml
-kubectl apply -f ec2nodeclass-general.yaml
-kubectl wait --for=condition=Ready ec2nodeclass/general --timeout=300s
-kubectl describe ec2nodeclass general
 ```
 
 NodeClass의 예약량은 kubeadm을 통해 워커가 받는 kubelet 설정과 일치시켰다. Custom AMI에서는 NodeClass 설정만으로 kubelet 파일이 자동 수정되지 않는다.
 
 루트 40Gi는 용량 예시이며 원본 AMI가 더 크면 그 크기를 사용한다. CPU AMI를 루트 EBS 하나로 만들었다는 전제다. 추가 EBS에 필요한 데이터가 있다면 그 매핑·스냅샷도 보존한다. 고객 관리 KMS 키를 사용한다면 시작에 필요한 키 권한도 준비한다.
 
-**통과 기준:** NodeClass Ready, 실제 AMI·서브넷·SG·프로파일 조회 성공. server dry-run만으로 EC2 부팅 성공이 검증되지는 않는다. Karpenter 예약 소유권 태그는 controller가 부여하므로 수동 추가하지 않는다.
+**이 단계의 결과:** 실제 값과 전체 worker userData가 포함된 `ec2nodeclass-general.yaml` 파일이다. 아직 클러스터에 적용하지 않는다. 실제 조회·Ready 상태는 14단계의 웹 콘솔 Sync 후 확인한다. Karpenter 예약 소유권 태그는 controller가 부여하므로 수동 추가하지 않는다.
 
-## 14. CPU NodePool을 생성한다
+## 14. NodePool 파일을 준비하고 웹 콘솔에서 확장 설정을 배포한다
 
 필요한 이유: NodePool은 허용 인스턴스 유형·구매 방식·라벨·용량 상한을 정한다. 첫 검증은 on-demand로 진행해 Spot 중단 처리와 권한 문제를 분리한다.
 
-**기본 노드 셸**에서 실행한다.
+**기본 노드 셸**에서 NodePool 파일을 만든다. 이 파일도 Application YAML이 아니라 Karpenter가 사용할 실제 노드 풀 설정이다.
 
 ```bash
 cat > nodepool-general.yaml <<'EOF'
@@ -930,11 +1216,27 @@ spec:
     consolidateAfter: 1m
 EOF
 
-kubectl apply --dry-run=server -f nodepool-general.yaml
-kubectl apply -f nodepool-general.yaml
-kubectl wait --for=condition=Ready nodepool/general --timeout=300s
-kubectl describe nodepool general
 ```
+
+두 파일을 Git 저장소에 준비한 뒤 **Argo CD 웹 콘솔**에서 배포한다.
+
+1. 앱 Git 저장소의 `platform/karpenter/nodes/` 경로에 **`ec2nodeclass-general.yaml`과 `nodepool-general.yaml` 두 파일**을 저장·커밋한다. GitHub 등의 저장소 웹 화면에서 파일을 업로드해도 된다. 생성한 NodeClass 파일은 `userData`까지 포함한 전체를 저장한다.
+2. **Applications → NEW APP**에서 아래 항목을 입력하고 **CREATE**한다. 저장소 연결 방법은 12-3단계와 같다.
+
+| 항목 | 입력값 |
+|---|---|
+| Application Name | `karpenter-nodes` |
+| Project Name | `default` |
+| Sync Policy | **Manual** |
+| Repository URL | 두 YAML을 넣은 Git 저장소 |
+| Revision | 해당 커밋이 반영된 브랜치. 예: `main` |
+| Path | `platform/karpenter/nodes` |
+| Destination Cluster | `https://kubernetes.default.svc` 또는 `in-cluster` |
+| Destination Namespace | `kube-system`. NodeClass·NodePool 자체는 클러스터 범위 리소스 |
+
+3. **DIFF → SYNC → SYNCHRONIZE**로 두 리소스를 적용한다. Prune·Force는 선택하지 않는다.
+4. 리소스 트리에서 EC2NodeClass `general`과 NodePool `general`을 열고, 실제 매니페스트의 **`status.conditions`에서 `Ready=True`**인지 확인한다. NodeClass의 AMI·서브넷·SG·프로파일 조회가 실패하면 상세 조건과 controller Pod의 LOGS를 확인한다. Custom Resource의 Healthy 표시만으로 판단하지 않는다.
+5. 이후 변경은 Git의 해당 파일을 수정·커밋한 다음 웹 콘솔에서 **REFRESH → DIFF → SYNC**한다.
 
 두 유형의 리전·AZ 가용성과 On-Demand CPU 쿼터가 필요하다. maxPods 20은 이 유형의 IPv4 ENI 수용량 안에서 사용하는 예시다. 다른 유형·CNI 모드를 사용하면 다시 계산한다.
 
@@ -1144,6 +1446,8 @@ sudo crictl info
 
 가입 전 RuntimeReady=true·NetworkReady=false는 가능하다. CNI 설치 후에도 false면 원인을 확인한다. 공유할 로그에 토큰·인증 정보가 들어 있지 않은지 확인한다.
 
+CoreDNS의 health probe가 연결 거부되고 `ip route get Pod_IP`가 `local ... dev lo`이면, Pod IP가 호스트 주소로 중복 등록됐는지 확인한다. 현장에서 확인된 원인과 새 AMI 예방 설정은 [AL2023 VPC CNI 재발 방지 가이드](./al2023-vpc-cni-network-prevention-guide.md)에 정리했다. IP 한 개를 수동 삭제한 것만으로 모든 Pod·새 ENI의 재발 방지가 완료되지는 않는다.
+
 ## 완료 판정과 다음 범위
 
 필요한 이유: 문서 작성·매니페스트 적용과 실제 자동 확장 성공은 다르다. 각 단계의 증거를 남겨 GPU·앱 배포의 출발점으로 사용한다.
@@ -1152,26 +1456,30 @@ sudo crictl info
 |---|---|
 | 기본 노드 | init 성공·Node Ready·안정적인 사설 API·일반 앱 배치 허용 |
 | CNI·CCM·DNS | 파드 정상·cloud 초기화 taint 제거 |
+| LBC·Argo CD | 기본 노드에서 Ready·Ingress 도메인으로 Argo CD 로그인. 여기까지는 Karpenter 불필요 |
+| 앱 배포 | 웹 콘솔에서 저장소 연결·Application 생성·Sync, 앱 정상 상태 확인 |
 | IAM | CP·워커 역할 분리·인증/권한 오류 없음 |
 | 자동 가입 | 새 워커가 SSM 조회 후 고유 신원으로 join |
-| Karpenter | NodeClass/NodePool Ready·NodeClaim 준비 조건 정상 |
+| 이후 선택: Karpenter | 웹 콘솔로 생성한 `karpenter`·`karpenter-nodes` Synced, NodeClass/NodePool Ready·NodeClaim 준비 조건 정상 |
 | CPU 확장 | 기본 노드에서 앱 실행 → 용량 부족 → 추가 EC2·파드 실행 |
 | ECR | private pull 검증 또는 미검증 명시 |
 | 축소 | 워커·NodeClaim·EC2 정리 |
 | 재확장 기반 | 워커 0대에도 CP·Karpenter 정상 |
 
-이후 범위는 앱·KEDA·관측성·ALB 또는 GPU 풀이다. Spot을 추가할 때는 service-linked role·interruption queue·권한·중단 동작을 준비한다. 이 가이드는 단일 CP PoC이며 HA·백업·외부 공개 구성을 완료하지 않는다.
+이후 범위는 앱·KEDA·관측성 또는 GPU 풀이다. 여기서는 Argo CD의 ALB·CloudFront 공개 경로까지 다루며 앱용 Ingress·CloudFront behavior는 별도 구성한다. Spot을 추가할 때는 service-linked role·interruption queue·권한·중단 동작을 준비한다. 이 가이드는 단일 CP PoC이며 HA·백업 구성은 포함하지 않는다.
 
 ## 문서 검증 범위
 
 필요한 이유: 로컬 문법·설정 생성 검증과 실제 AWS 동작 검증을 구분해야 문서의 통과 기준을 배포 성공으로 오인하지 않는다. 실행 결과는 위 단계별 완료 증거로 남긴다.
 
 - Bash 코드 블록 구문과 내장 Python 코드 구문 검사 통과.
-- 공식 Karpenter 템플릿의 두 정책과 제공 JSON의 대응·치환·JSON 파싱 확인.
+- LBC·Karpenter Helm values 파싱, Ingress 공개 → 일반 앱 웹 콘솔 배포 → 이후 선택 Karpenter 설치 순서, Application YAML 파일 생성·apply 절차 제거, CRD 포함 단일 Helm Application·수동 Sync·Server-Side Apply 설정, 기본 노드 selector·워커 hop limit 1 유지 확인. Argo CD 배치 patch는 Deployment·StatefulSet 두 종류를 대상으로 모의 실행했다.
+- Argo CD Ingress YAML·annotation 내부 JSON 파싱, HTTP listener/backend·Service 80 포트, `/argocd` rootpath·basehref·외부 URL·health check, server 재시작 순서, CloudFront의 `/argocd`·`/argocd/*` behavior와 HTTP origin·HTTPS viewer·기본 403·prefix list 연결 확인. 실제 ALB·CloudFront 배포·TLS 통신은 실행하지 않았다.
+- 사용처별 재구성 전후 기본 노드 정책의 24개 고유 Action 집합 일치, 6개 Statement의 Allow·Resource "*"·조건/치환값 없음 및 JSON 파싱 확인.
 - YAML 템플릿의 maxPods·예약량·외부 cloud 설정·NodeClass 참조·공통 파드 selector·기본 노드 선호 연결 확인.
-- 워커 userData 모의 검증: Karpenter 가입·수동 가입 성공, SSM 오류·잘못된 토큰·가입 실패에서 중단 및 임시 가입 파일 정리 확인.
-- userData의 토큰 미출력과 16KB 제한 확인. 실제 생성 예시는 약 2.3KB다.
-- 실제 AWS IAM 적용·EC2 생성·kubeadm 실행·Helm OCI 렌더링·클러스터 네트워크 검증은 이 작업 환경에서 수행하지 않았다. 사용 환경에서 각 단계의 통과 기준을 확인해야 한다.
+- 워커 userData 모의 검증 10건: 사전 환경변수 없는 Karpenter·수동 가입, 다른 값의 외부 환경변수 무시, SSM 오류·잘못된 토큰/CA hash·가입 실패·리전 불일치·잘못된 maxPods에서 중단, 이미 가입한 노드 재가입 생략 확인. 임시 파일 삭제와 토큰 미출력도 확인.
+- userData의 16KB 제한 확인. 현재 예시는 2,378바이트다.
+- 실제 AWS IAM 적용·EC2 생성·kubeadm 실행·Helm OCI 렌더링·Argo CD Sync·클러스터 네트워크 검증은 이 작업 환경에서 수행하지 않았다. 사용 환경에서 각 단계의 통과 기준을 확인해야 한다.
 
 ## 공식 근거
 
@@ -1195,6 +1503,27 @@ sudo crictl info
 - [CNI README·호환성](https://github.com/aws/amazon-vpc-cni-k8s/blob/e082bae7c03ddc28357b01595f3746b117ac08c7/README.md)
 - [고정 CCM chart](https://github.com/kubernetes/cloud-provider-aws/tree/1c494fbc3edacf55e2a1e06df21858c03ff9c457/charts/aws-cloud-controller-manager)
 - [CCM 노드 정보 구현](https://github.com/kubernetes/cloud-provider-aws/blob/1c494fbc3edacf55e2a1e06df21858c03ff9c457/pkg/providers/v1/instances_v2.go)
+- [LBC 설치·non-EKS·IMDS·네트워크 요구사항](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/deploy/installation/)
+- [고정 LBC 차트 버전](https://github.com/kubernetes-sigs/aws-load-balancer-controller/blob/v3.6.1/helm/aws-load-balancer-controller/Chart.yaml)
+- [LBC 서브넷 선택](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/deploy/subnet_discovery/)
+- [LBC Ingress annotation·prefix list·헤더 조건](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/ingress/annotations/)
+- [Argo CD Ingress·TLS 종료·server.insecure](https://argo-cd.readthedocs.io/en/release-3.5/operator-manual/ingress/)
+- [CloudFront origin의 프로토콜·포트 설정](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesOrigin.html)
+- [CloudFront behavior 경로 패턴·우선순위](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesCacheBehavior.html#DownloadDistValuesPathPattern)
+- [ACM 일반 공개 인증서 무료 발급](https://aws.amazon.com/certificate-manager/pricing/)
+- [CloudFront 인증서 리전·요구사항](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cnames-and-https-requirements.html)
+- [CloudFront 관리형 origin request 정책](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-origin-request-policies.html)
+- [CloudFront 관리형 cache 정책·CachingDisabled](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html)
+- [CloudFront에서만 ALB 접근 허용](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/restrict-access-to-load-balancer.html)
+- [기존 EC2의 IMDS hop limit 변경](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-IMDS-existing-instances.html#modify-PUT-response-hop-limit)
+- [고정 Argo CD v3.5.5 설치 릴리스](https://github.com/argoproj/argo-cd/releases/tag/v3.5.5)
+- [Argo CD의 Kubernetes 테스트 버전](https://argo-cd.readthedocs.io/en/stable/operator-manual/installation/#tested-versions)
+- [Argo CD 웹 콘솔의 앱 생성·동기화](https://argo-cd.readthedocs.io/en/stable/getting_started/#creating-apps-via-ui)
+- [Argo CD 웹 콘솔의 Helm·OCI 저장소 연결](https://argo-cd.readthedocs.io/en/stable/user-guide/private-repositories/#helm)
+- [Argo CD Helm 차트 렌더링·CRD 포함](https://argo-cd.readthedocs.io/en/stable/user-guide/helm/)
+- [Argo CD 초기 로그인](https://argo-cd.readthedocs.io/en/stable/getting_started/)
+- [Argo CD Server-side apply](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-options/#server-side-apply)
+- [Karpenter controller 차트·CRD 차트의 CRD 포함 범위](https://karpenter.sh/docs/upgrading/upgrade-guide/#crd-upgrades)
 - [Karpenter 호환성](https://karpenter.sh/docs/upgrading/compatibility/)
 - [Karpenter controller 설정](https://karpenter.sh/docs/reference/settings/)
 - [고정 Karpenter IAM 템플릿](https://github.com/aws/karpenter-provider-aws/blob/b2896451034b61e8641b8b891e4a0f10d905608f/website/content/en/docs/getting-started/getting-started-with-karpenter/cloudformation.yaml)
