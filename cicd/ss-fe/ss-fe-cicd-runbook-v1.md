@@ -1,6 +1,7 @@
 # ss-fe CI/CD 작업 절차
 
 이 문서를 위에서 아래로 그대로 따라 하면 같은 결과가 만들어진다.
+설명은 [ss-fe-cicd-concepts-v1.md](ss-fe-cicd-concepts-v1.md) 참조.
 
 - 레포: `say-scene/ss-fe`
 - AWS 계정: `944296702922` / 리전 `ap-northeast-2`
