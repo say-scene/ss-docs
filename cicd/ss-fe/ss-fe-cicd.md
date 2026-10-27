@@ -83,4 +83,4 @@ git push origin main
 |---|---|
 | ✅ **완료** | 1단계 트리거 / 2단계 검증 / 3단계 A구간 S3 업로드 |
 | ⏭️ **다음** | 3단계 B구간: CloudFront + OAC + SPA Function + invalidation<br>화면을 볼 수 있는 건 이때부터 |
-| 🔜 **이후** | `ss_be` → `ss_triton` → `ss_k8s` |
+| 🔜 **이후** | `ss-be` → `ss-triton` → `ss-k8s` |
