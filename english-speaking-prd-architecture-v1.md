@@ -406,7 +406,7 @@ Redis 매니페스트는 `k8s-manifests`에 두며 공식 이미지 버전을 �
 | triton | `triton` main push | `docker buildx build` (레포 루트 컨텍스트) | ECR `triton:<sha>` | 동일 |
 
 **이미지 태그 정책 (backend·triton 공통)**
-- 태그는 **git commit SHA**로 고정한다(`${GITHUB_SHA}` 전체 또는 앞 12자리). 매니페스트에서 `latest`는 사용하지 않는다.
+- BE·Triton 이미지 태그는 **git commit SHA 앞 7자리**로 고정한다(`${GITHUB_SHA::7}`). FE의 S3 `commit` 메타데이터는 기존 전체 SHA를 유지한다. 매니페스트에서 `latest`는 사용하지 않는다.
 - ECR 리포지토리의 **tag immutability를 활성화**해 같은 태그를 덮어쓸 수 없게 한다(SHA 태그의 의미 보장).
 - **앱 이미지 배포/롤백** = `k8s-manifests`의 이미지 태그 변경/복귀 커밋. 단, Triton 배포는 `이미지 SHA/digest + AMI ID + 모델/토크나이저 revision + 모델 설정`의 호환 가능한 묶음으로 기록한다.
 - 가중치·토크나이저·런타임이 바뀌면 새 AMI 필요 여부와 기존 이미지의 호환성을 확인한다. 롤백도 이전 묶음의 가중치 접근과 두 모델 readiness를 검증한다. 이미지 SHA 복귀만으로 항상 복구된다고 가정하지 않는다.

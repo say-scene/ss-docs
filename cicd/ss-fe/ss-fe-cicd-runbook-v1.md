@@ -1,8 +1,9 @@
-# ss_fe CI/CD 작업 절차
+# ss-fe CI/CD 작업 절차
 
 이 문서를 위에서 아래로 그대로 따라 하면 같은 결과가 만들어진다.
+설명은 [ss-fe-cicd-concepts-v1.md](ss-fe-cicd-concepts-v1.md) 참조.
 
-- 레포: `say-scene/ss_fe`
+- 레포: `say-scene/ss-fe`
 - AWS 계정: `944296702922` / 리전 `ap-northeast-2`
 - 버킷: `ss-fe-944296702922-ap-northeast-2-an`
 
@@ -39,7 +40,7 @@ git add .github/workflows/build.yml && git commit -m "ci: 빌드 워크플로 �
 ### 1-3. 확인
 
 ```bash
-gh run list --repo say-scene/ss_fe --limit 3
+gh run list --repo say-scene/ss-fe --limit 3
 ```
 
 | 기대 | |
@@ -96,13 +97,13 @@ git add .github/workflows/build.yml && git commit -m "ci: 빌드 검증 스텝 �
 ### 2-3. 확인
 
 ```bash
-RUN=$(gh run list --repo say-scene/ss_fe --limit 1 --json databaseId --jq '.[0].databaseId') && gh run view $RUN --repo say-scene/ss_fe
+RUN=$(gh run list --repo say-scene/ss-fe --limit 1 --json databaseId --jq '.[0].databaseId') && gh run view $RUN --repo say-scene/ss-fe
 ```
 
 6스텝 전부 초록. 첫 실행은 캐시가 없어 2~3분.
 
 ```bash
-gh run view $RUN --repo say-scene/ss_fe --log | grep -iE "Test Files|Tests |built in|dist/"
+gh run view $RUN --repo say-scene/ss-fe --log | grep -iE "Test Files|Tests |built in|dist/"
 ```
 
 빌드 산출물의 해시 파일명을 확인해 둔다 (3단계 캐시 정책의 근거).
@@ -116,22 +117,27 @@ gh run view $RUN --repo say-scene/ss_fe --log | grep -iE "Test Files|Tests |buil
 IAM 롤의 신뢰 정책에 들어갈 값을 먼저 확인한다. 이걸 건너뛰면 인증이 거부된다.
 
 ```bash
-gh api repos/say-scene/ss_fe/actions/oidc/customization/sub
+gh api repos/say-scene/ss-fe/actions/oidc/customization/sub
 ```
 
 ```json
 {"use_default":true,"use_immutable_subject":true,
- "sub_claim_prefix":"repo:say-scene@345080911/ss_fe@1426408350"}
+ "sub_claim_prefix":"repo:say-scene@345080911/ss-fe@1426408350"}
 ```
 
 신뢰 정책에 쓸 `sub` 값 = `sub_claim_prefix` + `:ref:refs/heads/main`
 
 ```
-repo:say-scene@345080911/ss_fe@1426408350:ref:refs/heads/main
+repo:say-scene@345080911/ss-fe@1426408350:ref:refs/heads/main
 ```
 
-`use_immutable_subject`가 `false`면 이름 기반(`repo:say-scene/ss_fe:ref:refs/heads/main`)이다.
-레포마다 ID가 다르므로 `ss_be`, `ss_triton`, `ss_k8s`도 각각 조회한다.
+`use_immutable_subject`가 `false`면 이름 기반(`repo:say-scene/ss-fe:ref:refs/heads/main`)이다.
+레포마다 ID가 다르므로 `ss-be`, `ss-triton`, `ss-k8s`도 각각 조회한다.
+
+> **레포·조직 이름을 바꾸면 이 값을 다시 조회해서 3-2의 신뢰 정책을 고친다.**
+> `sub`에는 ID와 **이름이 함께** 들어가므로, ID가 그대로여도 리네임만으로 인증이 거부된다.
+> 2026-10-23 `ss_fe` → `ss-fe` 리네임 때 실제로 겪었다.
+> 코드는 한 줄도 안 바뀌므로 `build.yml`을 들여다봐도 원인이 보이지 않는다.
 
 ### 3-1. S3 버킷 (AWS 콘솔)
 
@@ -212,7 +218,7 @@ repo:say-scene@345080911/ss_fe@1426408350:ref:refs/heads/main
       "Condition": {
         "StringEquals": {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-          "token.actions.githubusercontent.com:sub": "repo:say-scene@345080911/ss_fe@1426408350:ref:refs/heads/main"
+          "token.actions.githubusercontent.com:sub": "repo:say-scene@345080911/ss-fe@1426408350:ref:refs/heads/main"
         }
       }
     }
@@ -227,11 +233,11 @@ repo:say-scene@345080911/ss_fe@1426408350:ref:refs/heads/main
 ### 3-5. GitHub Variables
 
 ```bash
-gh variable set AWS_ACCOUNT_ID --repo say-scene/ss_fe --body "944296702922" && gh variable set S3_BUCKET --repo say-scene/ss_fe --body "ss-fe-944296702922-ap-northeast-2-an"
+gh variable set AWS_ACCOUNT_ID --repo say-scene/ss-fe --body "944296702922" && gh variable set S3_BUCKET --repo say-scene/ss-fe --body "ss-fe-944296702922-ap-northeast-2-an"
 ```
 
 ```bash
-gh variable list --repo say-scene/ss_fe
+gh variable list --repo say-scene/ss-fe
 ```
 
 `Secrets`가 아니라 `Variables`. 비밀이 아니고 로그에 보여야 디버깅이 된다.
@@ -280,13 +286,15 @@ jobs:
         run: |
           aws s3 sync dist/ s3://${{ vars.S3_BUCKET }}/ \
             --exclude index.html \
-            --cache-control "public,max-age=31536000,immutable"
+            --cache-control "public,max-age=31536000,immutable" \
+            --metadata "commit=${{ github.sha }},run=${{ github.run_id }}"
 
       - name: index.html 업로드 (캐시 금지)
         if: github.ref == 'refs/heads/main'
         run: |
           aws s3 cp dist/index.html s3://${{ vars.S3_BUCKET }}/index.html \
-            --cache-control "no-cache"
+            --cache-control "no-cache" \
+            --metadata "commit=${{ github.sha }},run=${{ github.run_id }}"
 EOF
 ```
 
@@ -301,13 +309,13 @@ git add .github/workflows/build.yml && git commit -m "ci: S3 업로드 스텝 �
 ### 3-8. 확인
 
 ```bash
-RUN=$(gh run list --repo say-scene/ss_fe --limit 1 --json databaseId --jq '.[0].databaseId') && gh run view $RUN --repo say-scene/ss_fe
+RUN=$(gh run list --repo say-scene/ss-fe --limit 1 --json databaseId --jq '.[0].databaseId') && gh run view $RUN --repo say-scene/ss-fe
 ```
 
 8스텝 전부 초록이어야 한다.
 
 ```bash
-gh run view $RUN --repo say-scene/ss_fe --log | grep -iE "Authenticated|upload:"
+gh run view $RUN --repo say-scene/ss-fe --log | grep -iE "Authenticated|upload:"
 ```
 
 ```
@@ -340,7 +348,7 @@ upload: dist/index.html          →  s3://.../index.html        ← 맨 마지�
 ## 실패 시 조치
 
 ```bash
-gh run view $RUN --repo say-scene/ss_fe --log-failed
+gh run view $RUN --repo say-scene/ss-fe --log-failed
 ```
 
 | 에러 | 원인 | 고칠 곳 |
@@ -354,7 +362,7 @@ gh run view $RUN --repo say-scene/ss_fe --log-failed
 AWS 설정만 고친 경우 코드 변경 없이 재실행:
 
 ```bash
-gh run rerun $RUN --repo say-scene/ss_fe
+gh run rerun $RUN --repo say-scene/ss-fe
 ```
 
 ---
