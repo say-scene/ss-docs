@@ -1,4 +1,4 @@
-# ss_fe — main push 한 장 요약
+# ss-fe — main push 한 장 요약
 
 ## 미리 준비 (1회성)
 
