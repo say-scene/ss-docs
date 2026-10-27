@@ -1,6 +1,6 @@
 # Karpenter CPU 확장 풀(`general`) 결정 기록
 
-> 상태: **진행 중 (0단계 사전 검증 완료, 노드 정의 main 머지 완료, controller 렌더링 완료)** · 작성일: 2026-10-26
+> 상태: **진행 중 (설치·확장·축소 검증 완료, 가이드 정정 대기)** · 작성일: 2026-10-26 · 갱신: 2026-10-27 (트러블슈팅 §9 추가)
 > 근거 문서: [english-speaking-prd-architecture-v1.md](english-speaking-prd-architecture-v1.md) §6.4·§6.5·§7, [al2023-cpu-cluster-karpenter-guide.md](al2023-cpu-cluster-karpenter-guide.md) "이후 선택: Karpenter 설치"·13~17단계
 
 ---
@@ -9,7 +9,7 @@
 
 - kubeadm 단일 기본 노드(t3.large) 위에 Karpenter를 설치하고, CPU 확장 풀 `general`을 추가한다. Karpenter 차트는 **로컬에서 `helm template`으로 렌더링한 YAML을 ss-k8s에 커밋**하고 Argo CD가 Git에서 배포한다(`platform/karpenter/controller/`).
 - 기본 노드가 수용하지 못한 Pending 파드가 생기면 Karpenter가 **t3.large on-demand 워커를 최대 1대** 띄운다. 워커는 Custom AMI + userData로 `kubeadm join` 한다.
-- 노드 정의(EC2NodeClass·NodePool)는 `say-scene/ss-k8s`의 `platform/karpenter/nodes/`에 두고 Argo CD Application `karpenter-nodes`로 배포한다.
+- 노드 정의(EC2NodeClass·NodePool)는 `say-scene/ss-k8s`의 `platform/karpenter/nodes/`에 두고, `controller/kustomization.yaml`이 `../nodes`를 참조해 **Argo CD Application `karpenter` 하나**로 본체와 함께 배포한다.
 - 아래 상수·조회값은 팀 리뷰로 하나씩 확정했다. 변경하려면 이 문서의 근거를 먼저 확인한다.
 
 ---
@@ -22,9 +22,9 @@
 | 0 | 사전 검증(태그·kubelet 설정·라벨·여유·SSM) | **완료** — §4 |
 | 1 | ss-k8s 노드 정의 작성 (`platform/karpenter/nodes/`) | **완료**, main 머지 (`ecfec9d`) |
 | 2 | ~~Argo CD에 Karpenter OCI Helm 저장소 연결 (가이드 K-1)~~ → controller 렌더링·커밋 (`platform/karpenter/controller/`) | **렌더링 완료** — §6 |
-| 3 | `karpenter` Application 생성·Sync (Git 경로 `platform/karpenter/controller`, Server-Side Apply) → CRD 5개 `Established` | 대기 |
-| 4 | `karpenter-nodes` Application 생성·Sync → NodeClass/NodePool `Ready=True` | 대기 |
-| 5 | 확장·축소 검증 (가이드 15~17) | 대기 — replicas 재산정 필요(§7) |
+| 3 | `karpenter` Application 생성·Sync (Git 경로 `platform/karpenter/controller`, Server-Side Apply) → CRD 5개 `Established` | **완료** |
+| 4 | ~~`karpenter-nodes` Application 별도 생성~~ → `karpenter` Application이 `../nodes`까지 적용 (ss-k8s `9de74cb`) | **완료** — NodePool 미적용 장애 후 변경, §9-1 |
+| 5 | 확장·축소 검증 (가이드 15~17) | **완료** — ss-be 롤아웃으로 워커 생성·가입·Running, replicas 0으로 워커 자동 종료. 노드 간 DNS 장애 해결 후 통과, §9-2 |
 | 6 | 가이드 문서 정정 (§8) | 대기 |
 
 ---
@@ -75,6 +75,7 @@
 | 사람이 values 변경 시에만 `render.sh`를 **수동 실행**, GitHub Actions 미사용 | 설정 변경 빈도가 낮아 자동 커밋 봇·충돌 처리나 CI 검사는 과하다. 렌더링 누락은 `values.yaml` 상단 주석으로 상기한다. |
 | 렌더링 결과(`karpenter.yaml`)는 **직접 수정 금지** | 다시 렌더링하면 수동 수정이 사라진다. 설정은 항상 `values.yaml`에서 바꾼다. |
 | Application 생성·Sync는 Argo CD **웹 콘솔**, 수동 Sync | Application YAML을 따로 관리하지 않는 기존 운영 방식 유지. 같은 리소스를 Helm CLI와 Argo CD가 중복 관리하지 않는다. |
+| 본체와 노드 정의를 **`karpenter` Application 하나**로 적용 (`../nodes` kustomize 참조) | 파일 이동 없이 폴더 구분(렌더링 산출물 vs 사람이 고치는 파일)을 유지하면서 Application 하나로 관리. 대가: 앱 삭제 시 NodePool도 삭제되고, 노드 설정만 바꿔도 앱 전체가 Sync 대상 (§5). |
 | 노드 정의 경로 `ss-k8s/platform/karpenter/nodes/` | 앱(`apps/`)과 클러스터 인프라를 분리. 이후 GPU 풀·KEDA도 `platform/` 아래에 추가한다. |
 | NodeClass 값은 `settings.env` 없이 콘솔·AWS CLI로 하나씩 조회 | 가이드 0단계의 `settings.env`를 만들지 않았다. 생성 스크립트 대신 확정값을 직접 매니페스트에 기록해 리뷰 가능하게 했다. |
 | **userData 원본은 Git**(ss-k8s의 EC2NodeClass)으로 한다 | 그동안 Notion에서 관리했으나 Karpenter가 실제로 쓰는 것은 Git 본이다. Notion을 고쳐도 워커에 반영되지 않는다. |
@@ -130,6 +131,10 @@ Karpenter controller(200m) 설치 후 기본 노드 CPU 여유는 **100m**이 �
 - **Karpenter 설정 변경은 `values.yaml` 수정 → `./render.sh` → 두 파일 함께 커밋** 순서로 한다. `render.sh`만 잊으면 커밋은 됐는데 클러스터에는 반영되지 않는다.
 - t3는 CPU 크레딧 unlimited 기본값이라 CPU를 오래 높게 쓰면 추가 과금된다.
 - NodePool `limits`는 지출 하드 캡이 아니다. 병렬 생성 중 일시 초과할 수 있다.
+- **노드 공통 SG(`sayscene-sg`)의 자기 참조 인바운드는 반드시 "모든 트래픽"이어야 한다.** CoreDNS가 기본 노드에만 있어 워커 파드의 DNS 질의(UDP 53)는 항상 노드를 넘는다. TCP만 허용하면 TCP 통신은 되는데 이름 해석만 실패해 원인을 찾기 어렵다(§9-2). SG를 새로 만들거나 규칙을 정리할 때 유지한다.
+- **`karpenter` Application을 삭제·재생성하면 NodePool도 삭제**되어 Karpenter가 워커를 모두 정리한다. 노드 설정만 바꿔도 2,800줄짜리 앱 전체가 DIFF·Sync 대상이니 DIFF에서 노드 리소스 변경만 있는지 확인한다.
+- 노드 정의를 볼 Application이 없으면 Karpenter는 `no dynamic nodepools found`만 남기고 워커를 만들지 않는다. 확장이 안 되면 먼저 `kubectl get nodepools,ec2nodeclasses`의 존재·`READY`를 본다(§9-1).
+- 검증 중 `kubectl scale` 등으로 Argo CD 관리 리소스를 직접 바꾸면 Argo CD에서 OutOfSync로 보이고 다음 Sync 때 Git 값으로 되돌아간다. 테스트 후 Git 기준으로 원복을 확인한다.
 - Karpenter는 kubeadm(non-EKS)을 공식 지원하지 않는다. PRD §7 통과 기준으로 직접 검증하며, D3에서 2일 이상 막히면 Cluster Autoscaler 대안을 검토한다(자동 전환 금지).
 
 ---
@@ -159,15 +164,15 @@ ss-k8s `platform/karpenter/controller/`:
 
 팀원마다 helm 버전이 다르면 출력이 미세하게 달라질 수 있다. 재렌더링 diff가 values 변경과 무관하게 크면 helm 버전부터 확인한다.
 
-Argo CD `karpenter` Application 입력값: Path `platform/karpenter/controller`, Destination namespace `kube-system`, 수동 Sync, **Server-Side Apply**(큰 CRD의 annotation 크기 제한 회피), Prune·Force 미선택. 통과 기준은 controller Healthy, 로그에 AWS 권한 오류 없음, **CRD 5개 `Established=True`**.
+Argo CD `karpenter` Application 입력값: Path `platform/karpenter/controller`, Destination namespace `kube-system`, 수동 Sync, **Server-Side Apply**(큰 CRD의 annotation 크기 제한 회피), Prune·Force 미선택. 통과 기준은 controller Healthy, 로그에 AWS 권한 오류 없음, **CRD 5개 `Established=True`**, `../nodes` 참조로 함께 적용되는 **EC2NodeClass·NodePool `general` `READY=True`**. kustomize 빌드 결과는 렌더링 18개 + 노드 정의 2개 = 20개 리소스다.
 
 ---
 
 ## 7. 남은 작업과 미결 사항
 
-- **5단계 replicas 재산정**: 가이드 15-2의 31개는 maxPods 기준이다. 이번 구성은 CPU가 먼저 부족하다(테스트 파드 100m 기준 기본 노드 1개 + 워커 약 16개). 31개면 약 14개가 계속 Pending이므로 검증 시점에 값을 다시 정한다.
-- 16단계 private ECR pull: 테스트 이미지 확보 여부 미정. 없으면 미검증으로 기록한다.
-- ss-k8s controller 렌더링본(`feature/karpenter-controller-render`) main 머지. 3·4단계 Application의 Revision은 `main`을 사용한다.
+- 가이드 15-2 `cpu-test`(replicas 31)는 실행하지 않고 ss-be 롤아웃으로 확장을 검증했다. 다시 수행한다면 CPU가 먼저 부족하므로(테스트 파드 100m 기준 기본 노드 1개 + 워커 약 16개) replicas를 재산정한다.
+- 워커 AMI(`ami-04e5c592ecea95a37`)에 networkd 재발 방지 설정(`/etc/systemd/networkd.conf.d/`)이 포함됐는지 확인. 없다면 워커에 보조 ENI가 붙을 때 DNS 장애가 재발할 수 있다.
+- 매일 stop/start 후 워커가 남아 있지 않은지 확인하는 습관(§5). 자동화는 범위 밖.
 - Loki/Tempo용 S3 권한과 배치는 관측성 구성 때 결정.
 
 ---
@@ -185,13 +190,68 @@ Argo CD `karpenter` Application 입력값: Path `platform/karpenter/controller`,
 | NodeClass 생성 | `settings.env` + 스크립트 | 확정값 직접 기록 |
 | Karpenter 설치 | 웹 콘솔에서 OCI Helm 저장소 연결(K-1) + Helm 소스 Application·VALUES 입력(K-2) | 로컬 `render.sh` 렌더링본을 ss-k8s에 커밋, Application은 Git 경로 지정 |
 | 설치 후 확인할 CRD | 3개 | 5개 (`nodeoverlays`, `capacitybuffers` 추가) |
+| Application 구성 | `karpenter`(Helm) + `karpenter-nodes`(Git) 2개 | `karpenter` 1개가 `../nodes`까지 적용 |
+| SG 자기 참조 | 1-1에 allow-all 기준 명시 | 실제 설정이 TCP만이었음 → 모든 트래픽으로 수정. 가이드에 "UDP(DNS) 포함" 이유와 검증 명령을 보강 |
 
 ---
 
-## 9. 관련 파일
+## 9. 트러블슈팅 기록 (2026-10-26)
+
+### 9-1. `no dynamic nodepools found` — 워커가 생성되지 않음
+
+**증상:** ss-be 롤아웃 중 새 파드가 CPU 부족으로 Pending이 됐으나 워커가 생기지 않았다. Karpenter 로그에 `no dynamic nodepools found`.
+
+**진단:**
+
+| 확인 | 결과 |
+|---|---|
+| `kubectl get nodepools,ec2nodeclasses` | `No resources found` (CRD는 있음 — CRD가 없으면 `the server doesn't have a resource type` 오류) |
+| `kubectl -n argocd get application karpenter-nodes` | `NotFound`. Application은 `karpenter` 하나만 있고 경로는 `platform/karpenter/controller` |
+
+Karpenter 소스(`provisioner.go`) 기준으로 이 로그는 NodePool 목록에서 static·**Ready 아님**·삭제 중인 것을 제외한 뒤 **남은 NodePool이 없을 때** 출력된다.
+
+**원인:** `platform/karpenter/nodes/`를 보는 Application이 없어 NodePool·EC2NodeClass가 클러스터에 적용되지 않았다. Application 이름은 무관하며, 문제는 **어느 경로를 보느냐**였다.
+
+**해결 (ss-k8s `9de74cb`):** Application을 추가하는 대신 기존 `karpenter` Application 하나로 노드 정의까지 적용하도록 바꿨다.
+
+- `nodes/kustomization.yaml` 추가, `controller/kustomization.yaml`의 resources에 `../nodes` 추가.
+- kustomize는 보안 제한으로 루트 밖의 **파일**(`../nodes/nodepool-general.yaml`)을 직접 참조할 수 없다. **kustomization이 있는 디렉터리**(`../nodes`)는 참조할 수 있다.
+- 새 클러스터 첫 Sync에서 CRD보다 NodePool dry-run이 먼저 실패하지 않도록 EC2NodeClass·NodePool에 `argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true`.
+
+### 9-2. 워커의 ss-be가 `PodInitializing`에서 멈춤 — 노드 간 DNS(UDP) 차단
+
+**증상:** 워커 `ip-10-0-9-11`에 뜬 ss-be 파드가 `Init:0/1`(PodInitializing)에서 진행되지 않았다. 이미지 pull은 완료.
+
+**진단:**
+
+| 확인 | 결과 | 해석 |
+|---|---|---|
+| init container `wait-for-redis` 로그 | `Redis 연결 대기 중...` / `Terminated` 반복 | `timeout 3`이 `redis-cli`를 종료 → 연결 거부가 아니라 **응답 없음** |
+| 워커의 `aws-node`·`kube-proxy` | Running | 워커 CNI 미준비는 아님 |
+| 워커 테스트 파드: DNS `10.96.0.10` (UDP 53) | ❌ timeout | 이름 해석 불가 |
+| 워커 테스트 파드: Redis 파드 IP `10.0.9.180:6379` (TCP) | ✅ open | Redis·노드 간 TCP 정상 (Redis는 기본 노드) |
+| 워커 테스트 파드: 기본 노드 `10.0.4.232:10250` (TCP) | ✅ open | 노드 간 TCP 정상 |
+| CoreDNS 위치 | 2개 모두 기본 노드 | 워커의 DNS 질의는 반드시 노드를 넘음 |
+| `sayscene-sg` 자기 참조 인바운드 | `tcp 0-65535`만 존재 | **UDP·ICMP 미허용** |
+
+**원인:** 노드 공통 SG의 자기 참조 규칙이 TCP만 허용해, 워커 파드 → 기본 노드 CoreDNS의 UDP 53 질의가 차단됐다. init container는 서비스 이름(`ss-redis`)으로 접속하므로 DNS 단계에서 막혔다. 단일 노드일 때는 모든 DNS 질의가 노드 안에서 끝나 SG를 거치지 않았기 때문에 드러나지 않았다. 가이드 1-1의 "자기 참조 allow-all" 기준과 실제 설정이 달랐다.
+
+**해결:** `sayscene-sg` 인바운드에 **유형 모든 트래픽, 소스 `sg-0590bbcc59ea3fdcb`(자기 자신)** 규칙 추가. 재시작 없이 즉시 적용됐다.
+
+**검증 결과:**
+
+- ss-be 파드가 워커에서 Running. ECR private 이미지(ss-be)를 워커 kubelet이 imagePullSecrets 없이 pull해 실행 → 가이드 16단계(private ECR pull) 충족.
+- ss-be replicas를 0으로 줄이자 워커 노드·NodeClaim이 자동 종료됐다(`WhenEmpty` consolidation) → 가이드 17단계 축소 동작 확인.
+
+**배제한 가설:** AL2023 networkd의 VPC CNI 규칙 삭제 문제([재발 방지 가이드](al2023-vpc-cni-network-prevention-guide.md)). 노드 간 파드 TCP가 정상이라 라우팅 문제는 아니었다. 다만 워커 AMI(`ami-04e5c592ecea95a37`)에 networkd 재발 방지 설정이 들어 있는지는 **확인하지 않았다**(§7).
+
+---
+
+## 10. 관련 파일
 
 - `say-scene/ss-k8s` `platform/karpenter/nodes/ec2nodeclass-general.yaml`
 - `say-scene/ss-k8s` `platform/karpenter/nodes/nodepool-general.yaml`
+- `say-scene/ss-k8s` `platform/karpenter/nodes/kustomization.yaml`
 - `say-scene/ss-k8s` `platform/karpenter/controller/` (`values.yaml`, `render.sh`, `karpenter.yaml`, `kustomization.yaml`)
 - [al2023-cpu-cluster-karpenter-guide.md](al2023-cpu-cluster-karpenter-guide.md)
 - [al2023-vpc-cni-network-prevention-guide.md](al2023-vpc-cni-network-prevention-guide.md)
