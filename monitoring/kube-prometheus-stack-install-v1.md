@@ -1,6 +1,6 @@
 # kube-prometheus-stack 설치 문서
 
-> 담당 ① · 작성 2026-10-27 · 갱신 2026-10-28 (네임스페이스 결정 반영) · 상태: **설치 완료 (2026-10-27 20:25, `Healthy` + `Synced`)**
+> 담당 ① · 작성 2026-10-27 · 갱신 2026-10-28 (네임스페이스 결정 + 배포 후 리뷰 반영) · 상태: **설치 완료 (2026-10-27 20:25, `Healthy` + `Synced`)**
 > 클러스터 전반은 [al2023-cpu-cluster-karpenter-guide.md](../al2023-cpu-cluster-karpenter-guide.md)
 > 배경과 팀 분담 검토(`관측성-검토.md`)·클러스터 구성 정리(`클러스터구성.md`)는 ① 담당 로컬 문서로, 이 저장소에 없다.
 
@@ -851,3 +851,115 @@ ssh -i <키> -L 3000:localhost:3000 ec2-user@<기본 노드 EIP>
 터널을 띄운 뒤 **그 노드에서 `port-forward` 가 돌고 있어야** 브라우저의 `localhost:3000` 이 연결된다.
 
 외부 노출(§7 2 단계)을 하면 이 과정이 없어진다. 현재는 보류 상태다.
+
+---
+
+## 13. 배포 후 리뷰 — 2026-10-28
+
+`Healthy` 가 된 뒤 ① 의 파일과 ③ 담당의 파일을 함께 검토했다. §12 는 **설치 중에 막힌 것**이고, 여기는 **설치가 끝난 뒤 남은 것**이다.
+
+| # | 이슈 | 소유 | 상태 |
+|---|---|---|---|
+| 1 | 관측 네임스페이스 미결 | ① | **해소** — `monitoring` 확정 (§9-1) |
+| 2 | ServiceMonitor `ss-be` 중복 | ① | 수정 대기 |
+| 3 | Grafana sidecar `searchNamespace` | ① | **불필요해짐** (§9-1) |
+| 4 | Grafana 데이터소스 ConfigMap 없음 | ③ | 전달 대기 |
+| 5 | `resources:` 미선언 4 개 | ③ | 전달 대기 |
+| 6 | `values.yaml` 이 폴더 최상위 | ③ | 확인 필요 |
+| 7 | Loki S3 접근 미검증 | ③ | 배포 후 검증 |
+
+기본 노드 집중은 §11 에 한계로 적어두었다. Loki · Tempo · Alloy 가 올라가면 더 심해진다.
+
+### 13-1. ServiceMonitor `ss-be` 가 둘이다 — ①
+
+```
+platform/kube-prometheus-stack/prometheus/values.yaml:50   additionalServiceMonitors: ss-be
+apps/ss-be/07_servicemonitor.yaml                          ServiceMonitor ss-be
+```
+
+③ 담당이 만든 쪽은 `apps/ss-be/kustomization.yaml` 의 `resources` 에 이미 들어 있어 **실제로 올라간다.** 둘 다 같은 Service 를 같은 경로로 가리켜 **같은 타깃을 두 번 수집한다.**
+
+```yaml
+# 양쪽이 동일
+selector: { matchLabels: { app: ss-be } }
+endpoints: [{ port: http, path: /actuator/prometheus }]
+```
+
+**① 의 것을 지운다.** 앱 메트릭은 앱 소유자가 앱 폴더에서 관리하는 쪽이 경계가 맞다. 수집 측이 앱의 포트 이름과 경로를 알고 있어야 할 이유가 없고, 앱이 바뀔 때 ① 의 파일을 같이 고쳐야 하는 결합이 생긴다.
+
+### 13-2. Grafana sidecar `searchNamespace` — ① · 해소
+
+sidecar 는 **기본적으로 자기 네임스페이스만** 본다. 네임스페이스를 분리했다면 `searchNamespace: ALL` 이 필요했다. §9-1 로 통일했으므로 **설정 없이 동작한다.** 분리로 되돌리면 다시 필요하다.
+
+### 13-3. Grafana 데이터소스 ConfigMap 이 없다 — ③
+
+sidecar 는 켜져 있다.
+
+```yaml
+# grafana/values.yaml:20
+sidecar:
+  datasources:
+    enabled: true
+    label: grafana_datasource
+```
+
+그런데 **그 라벨을 붙인 ConfigMap 이 저장소에 없다.**
+
+```
+grep -rl grafana_datasource .
+  → platform/kube-prometheus-stack/grafana/values.yaml  (라벨을 정의한 쪽뿐)
+```
+
+읽을 것이 없으므로 **Loki · Tempo 를 설치해도 Grafana 에서 보이지 않는다.** 차트가 만들어주지 않는 종류라 ③ 이 매니페스트를 추가해야 한다. 이 구멍은 13-5 와 묶여 있다 — 둘 자리가 없는 것이 원인이다.
+
+### 13-4. `resources:` 가 네 파일 모두 없다 — ③
+
+```
+platform/loki/values.yaml          0 건
+platform/tempo/values.yaml         0 건
+platform/alloy/logs/values.yaml    0 건
+platform/alloy/otlp/values.yaml    0 건
+```
+
+본인들도 주석에 `resources.requests 는 적용 보류` 라고 적어두었다. 네임스페이스를 통일했으니 **이 넷이 ① 의 스택과 같은 노드의 같은 여유를 나눠 쓴다.** requests 가 없으면 스케줄러가 남은 용량을 계산하지 못한다.
+
+§2 의 실측 여유(CPU 약 2,120m)를 어떻게 나눌지 숫자가 필요하다. 디스크는 더 빡빡하다 — 7.3G 여유에서 Prometheus 가 이미 쓰고 있다.
+
+### 13-5. `values.yaml` 이 폴더 최상위에 있다 — ③
+
+```
+platform/loki/values.yaml                            ← 폴더 최상위
+platform/tempo/values.yaml                           ← 폴더 최상위
+platform/kube-prometheus-stack/grafana/values.yaml   ← 하위 폴더
+```
+
+§4 의 multi-source 에서 `ref` 소스의 `path` 는 **매니페스트로도 렌더링된다.** 최상위 `.yaml` 이 그 대상이고, 그래서 `storage.yaml` 이 거기 있다. 같은 방식으로 Application 을 만들면 **`values.yaml` 이 매니페스트로 읽히려다 실패한다** — `apiVersion` · `kind` 가 없기 때문이다.
+
+③ 의 Application 설정 확인이 필요하다. 그리고 13-3 을 풀려면 ③ 도 매니페스트를 두어야 하므로, 규칙을 맞춰둔다.
+
+```
+폴더 하나 = 차트 하나
+
+최상위 .yaml      차트가 만들지 못하는 매니페스트   storage.yaml · datasource.yaml
+하위 폴더/values   차트에 넘기는 입력값
+```
+
+**깊이로 "Argo CD 가 그대로 올릴 것" 과 "차트에 넘길 것" 이 갈린다.** 예외가 아니라 일관된 규칙이 된다.
+
+### 13-6. Loki 의 S3 접근이 미검증 — ③
+
+```
+# loki/values.yaml:5
+# Pod 의 IMDS 접근과 S3 읽기·쓰기는 배포 후 검증한다.
+```
+
+`ec2nodeclass-general.yaml` 의 `httpPutResponseHopLimit: 1` 때문에 **확장 워커의 파드는 IMDS 에 도달하지 못한다.** Loki 는 기본 노드에 고정되어 있어 될 가능성이 높지만 **확인된 바 없다.**
+
+`serviceAccount` 의 `role-arn` 지정이 없어 **기본 노드 IAM 역할의 임시 자격 증명**에 의존한다. 그 역할에 S3 권한을 붙이는 것은 **권한 변경이라 승인이 필요하다.**
+
+### 13-7. 다음 할 일
+
+```
+① 13-1 수정 후 ss-k8s 에 커밋
+③ 13-3 · 13-4 · 13-5 · 13-6 전달 · 네임스페이스 monitoring 확정 공지
+```
