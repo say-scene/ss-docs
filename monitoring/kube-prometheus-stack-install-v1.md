@@ -1,6 +1,6 @@
 # kube-prometheus-stack 설치 문서
 
-> 담당 ① · 작성 2026-10-27 · 갱신 2026-10-28 (네임스페이스 결정 + 배포 후 리뷰 + ss-triton 정정) · 상태: **설치 완료 (2026-10-27 20:25, `Healthy` + `Synced`)**
+> 담당 ① · 작성 2026-10-27 · 갱신 2026-10-28 (네임스페이스 결정 + 배포 후 리뷰 + 13-1 수정) · 상태: **설치 완료 (2026-10-27 20:25, `Healthy` + `Synced`)**
 > 클러스터 전반은 [al2023-cpu-cluster-karpenter-guide.md](../al2023-cpu-cluster-karpenter-guide.md)
 > 배경과 팀 분담 검토(`관측성-검토.md`)·클러스터 구성 정리(`클러스터구성.md`)는 ① 담당 로컬 문서로, 이 저장소에 없다.
 
@@ -863,16 +863,16 @@ ssh -i <키> -L 3000:localhost:3000 ec2-user@<기본 노드 EIP>
 | # | 이슈 | 소유 | 상태 |
 |---|---|---|---|
 | 1 | 관측 네임스페이스 미결 | ① | **해소** — `monitoring` 확정 (§9-1) |
-| 2 | ServiceMonitor `ss-be` 중복 | ① | 수정 대기 |
+| 2 | ServiceMonitor `ss-be` 중복 | ① | **깃 반영 완료** — sync · 수동 삭제 남음 (§13-1) |
 | 3 | Grafana sidecar `searchNamespace` | ① | **불필요해짐** (§9-1) |
 | 4 | Grafana 데이터소스 ConfigMap 없음 | ③ | 전달 대기 |
 | 5 | `resources:` 미선언 4 개 | ③ | 전달 대기 |
 | 6 | `values.yaml` 이 폴더 최상위 | ③ | 확인 필요 |
 | 7 | Loki S3 접근 미검증 | ③ | 배포 후 검증 |
 | 8 | `ss-triton` 서술이 낡음 | ① | **해소** — 문서 정정 (§13-7) |
-| 9 | 깃과 클러스터 어긋남 가능 | ① | **확인 필요** (§13-8) |
+| 9 | 깃과 클러스터 어긋남 가능 | ① | **해소** — 양쪽 sync 확인 (§13-8) |
 
-**§13-8 이 13-1 의 선행 조건이다.** 설치 후 다른 담당자가 `prometheus/values.yaml` 을 바꿨고 sync 여부가 확인되지 않았다.
+§13-8 로 양쪽 Application 이 모두 sync 되어 있음을 확인했고, **중복 수집이 실제로 발생 중**이었다. 13-1 을 깃에 반영했다 (`21f55fa`).
 
 기본 노드 집중은 §11 에 한계로 적어두었다. Loki · Tempo · Alloy 가 올라가면 더 심해진다.
 
@@ -916,6 +916,39 @@ kubectl -n monitoring delete servicemonitor <차트가 만든 ss-be 이름>
 ```
 
 지우지 않으면 **고치기 전과 똑같이 중복 수집이 계속된다.**
+
+#### 실측 — 중복이 실제로 있었다 (10-28)
+
+```
+kubectl -n monitoring get servicemonitors     ss-be      15h   ← 차트가 만든 것
+                                              ss-triton  90m
+kubectl -n sayscene  get servicemonitors      ss-be      13h   ← 앱 폴더의 것
+```
+
+둘 다 떠 있었다. 이름에 **release 접두사가 붙지 않는다** — `kube-prometheus-stack-ss-be` 가 아니라 `ss-be` 다. 삭제 명령의 대상 이름이 이것으로 확정됐다.
+
+지금 증상이 보이지 않는 이유는 `ss-be` 에 `micrometer-registry-prometheus` 가 없어 **양쪽 다 DOWN** 이기 때문이다. 계측이 들어가는 순간 드러난다.
+
+#### 조치 — 깃 반영 완료
+
+```
+ss-k8s  21f55fa  fix: ss-be ServiceMonitor 중복 제거
+        8bd5da8  Merge branch 'fix/servicemonitor-dedup'   main 반영
+```
+
+`additionalServiceMonitors` 는 남기고 **`ss-be` 항목만** 뺐다. 남은 것은 `ss-triton` 하나다. `storageSpec` · `retentionSize` · `serviceMonitorSelectorNilUsesHelmValues` 는 그대로인 것을 파싱해서 확인했다.
+
+#### 남은 수동 작업 — 클러스터
+
+```bash
+# 1. Argo CD 에서 Sync
+# 2. 차트가 더는 만들지 않지만 Prune 이 꺼져 있어 남는다
+kubectl -n monitoring delete servicemonitor ss-be
+
+# 3. 확인 — monitoring 에는 ss-triton 만, sayscene 에는 ss-be 만 남아야 한다
+kubectl -n monitoring get servicemonitors
+kubectl -n sayscene  get servicemonitors
+```
 
 ### 13-2. Grafana sidecar `searchNamespace` — ① · 해소
 
@@ -1030,19 +1063,24 @@ kubectl -n monitoring get servicemonitors
 kubectl -n sayscene  get servicemonitors
 ```
 
-| 보이는 것 | 해석 |
-|---|---|
-| `monitoring` 에 `…-ss-be` 하나뿐 | 20:32 상태. 아직 sync 안 됨 → 중복 없음 |
-| `monitoring` 에 `…-ss-be` · `…-ss-triton` + `sayscene` 에 `ss-be` | 모두 sync 됨 → **중복 수집 중** |
+#### 결과 — 어긋나지 않았다 (10-28 실측)
 
-Argo CD 카드의 `Synced` 는 **Application 기준**이다. 다른 Application 의 커밋은 이 카드에 나타나지 않으므로, 카드만 보고 판단하면 안 된다.
+```
+monitoring   ss-be 15h · ss-triton 90m    9e86d25 반영됨
+sayscene     ss-be 13h                    c64aba0 반영됨
+```
+
+**양쪽 Application 이 모두 sync 되어 있었다.** `ss-triton` 이 90m 인 것이 `9e86d25`(10-27 21:29) 적용의 증거다. 따라서 **중복 수집은 가정이 아니라 실제 상태**였고, 13-1 을 그대로 진행했다.
+
+Argo CD 카드의 `Synced` 는 **Application 기준**이다. 다른 Application 의 커밋은 이 카드에 나타나지 않으므로, 카드만 보고 판단하면 안 된다. 이번처럼 **리소스를 직접 세는 쪽이 확실하다.**
 
 ### 13-9. 다음 할 일
 
 ```
-①  13-8 확인      servicemonitors 실제 목록으로 깃·클러스터 일치 여부 판단
-①  13-1 수정      ss-be 항목만 제거 → 커밋 → sync → 손으로 옛 ServiceMonitor 삭제
-③  전달           13-3 · 13-4 · 13-5 · 13-6 · 네임스페이스 monitoring 확정 공지
+①  완료   13-8 확인        양쪽 sync 확인 · 중복 실재 확인
+①  완료   13-1 깃 반영      ss-be 항목 제거 (21f55fa · 8bd5da8)
+①  남음   13-1 클러스터     Sync → kubectl delete servicemonitor ss-be
+③  남음   전달             13-3 · 13-4 · 13-5 · 13-6 · 네임스페이스 monitoring 확정 공지
 ```
 
-**13-8 을 먼저 한다.** 어긋난 상태에서 13-1 을 고치면 무엇이 반영된 결과인지 구분할 수 없다.
+**Sync 와 수동 삭제를 둘 다 해야 끝난다.** Sync 만 하면 옛 ServiceMonitor 가 남아 중복이 계속된다.
