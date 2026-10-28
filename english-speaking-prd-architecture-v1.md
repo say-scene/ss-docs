@@ -372,7 +372,7 @@ python3 openai_frontend/main.py \
 
 - Spring Boot backend: OTel Java agent → Alloy(OTLP) → Tempo. 스팬: `stt` → Redis 이력 조회/갱신 → `llm` → 문장 완료 → TTS 시작/완료. 커스텀 메트릭: `turn_latency_seconds{stage}`, `sessions_started_total{preset}`, `rate_limited_total`, Redis 저장·복원 실패 횟수.
 - 메트릭: Prometheus(kube-prometheus-stack)가 backend, Triton `:8002`(vLLM 지표 포함 여부 확인), DCGM exporter, kube-state-metrics, node-exporter 수집.
-- 로그: Alloy DaemonSet → Loki(JSON 구조화, **발화 텍스트 제외**). Loki/Tempo 저장소 S3, 짧은 retention.
+- 로그: Alloy DaemonSet → Loki(JSON 구조화, **발화 텍스트 제외**). Loki는 작은 초기 배포에 Monolithic(이전 Helm 명칭 `SingleBinary`, `singleBinary` values 키는 유지) 단일 복제본을 사용한다. Loki 저장소는 초기 배포부터 S3로 구성하며, Tempo의 초기 시연은 임시 로컬 저장소를 허용한다. 운영 시 Loki/Tempo 저장소는 S3, 보관 기간은 짧게 설정한다.
 - (옵션) 브라우저 에러/성능: Alloy Faro receiver.
 - 대시보드: 턴 지연 분해, vLLM 대기열/KV, GPU 사용률/메모리, 429/에러율.
 
