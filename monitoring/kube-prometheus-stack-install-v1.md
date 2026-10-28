@@ -1,6 +1,6 @@
 # kube-prometheus-stack 설치 문서
 
-> 담당 ① · 작성 2026-10-27 · 갱신 2026-10-28 (네임스페이스 결정 + 배포 후 리뷰 반영) · 상태: **설치 완료 (2026-10-27 20:25, `Healthy` + `Synced`)**
+> 담당 ① · 작성 2026-10-27 · 갱신 2026-10-28 (네임스페이스 결정 + 배포 후 리뷰 + ss-triton 정정) · 상태: **설치 완료 (2026-10-27 20:25, `Healthy` + `Synced`)**
 > 클러스터 전반은 [al2023-cpu-cluster-karpenter-guide.md](../al2023-cpu-cluster-karpenter-guide.md)
 > 배경과 팀 분담 검토(`관측성-검토.md`)·클러스터 구성 정리(`클러스터구성.md`)는 ① 담당 로컬 문서로, 이 저장소에 없다.
 
@@ -28,7 +28,7 @@ Prometheus Operator 와 CRD 도 함께 들어온다
 | metrics-server | 없음 | 영향 없음. 스케줄링은 requests 기준 |
 | 기본 노드 taint | `node-role.kubernetes.io/control-plane:NoSchedule` | **toleration 필수** |
 | 앱 네임스페이스 | `sayscene` | ServiceMonitor 의 `namespaceSelector` |
-| `ss-triton` Service | **없다** | ServiceMonitor 를 만들어도 대상 0 개 |
+| `ss-triton` Service | 설치 당시 없었으나 **10-27 21:29 에 추가됨** | §13-8 참고 — `replicas: 0` 이라 endpoint 는 여전히 0 개 |
 
 ## 3. 폴더 구조
 
@@ -200,6 +200,8 @@ prometheus:
         endpoints:
           - port: http
             path: /actuator/prometheus
+      # [10-28 정정] 아래 주석은 설치 당시(10-27 20:25)의 상태다.
+      # 10-27 21:29 에 다른 담당자가 Service 와 함께 주석을 풀었다. §13-8 참고.
       # ss-triton 은 Service 가 아직 없다. 생기면 추가한다.
       # - name: ss-triton
       #   namespaceSelector: { matchNames: [sayscene] }
@@ -556,7 +558,7 @@ https://<도메인>/grafana/ 로 로그인된다
 
 `node-exporter` 만 NODE 가 다를 수 있다 — DaemonSet 이라 모든 노드에 뜬다. 지금은 노드가 하나라 차이가 없다.
 
-**`ss-be` Target 은 당분간 DOWN 이 정상이다.** 애플리케이션에 `micrometer-registry-prometheus` 가 들어가기 전까지 `/actuator/prometheus` 가 없다. `ss-triton` 은 Service 가 없어 ServiceMonitor 를 주석 처리해 두었다.
+**`ss-be` Target 은 당분간 DOWN 이 정상이다.** 애플리케이션에 `micrometer-registry-prometheus` 가 들어가기 전까지 `/actuator/prometheus` 가 없다. `ss-triton` 은 **설치 당시** Service 가 없어 주석 처리해 두었으나, 10-27 21:29 에 Service 와 함께 활성화되었다. 다만 `replicas: 0` 이라 endpoint 가 없다 — §13-8.
 
 `kubeControllerManager` · `kubeScheduler` · `kubeProxy` · `kubeEtcd` 는 **꺼두었다.** kubeadm 에서 `127.0.0.1` 에만 바인딩되어 수집에 실패하고, 켜두면 Target 4 개가 계속 DOWN 이면서 기본 알림이 발화해 **진짜 문제가 소음에 묻힌다.**
 
@@ -677,7 +679,7 @@ prefix list 만으로 가고 헤더 검증 포기   ← 현재 argocd Ingress �
 ```
 네임스페이스      앱은 sayscene, 이 스택은 monitoring
 ss-be Service     port name http · /actuator/prometheus
-ss-triton         Service 가 없다 — ServiceMonitor 주석 처리
+ss-triton         설치 당시 Service 없음 → 10-27 21:29 추가됨 (§13-8)
 루트 디스크        16G 중 7.3G 여유
 ss-k8s            공개 저장소 — 비밀값 커밋 불가
 ```
@@ -867,6 +869,10 @@ ssh -i <키> -L 3000:localhost:3000 ec2-user@<기본 노드 EIP>
 | 5 | `resources:` 미선언 4 개 | ③ | 전달 대기 |
 | 6 | `values.yaml` 이 폴더 최상위 | ③ | 확인 필요 |
 | 7 | Loki S3 접근 미검증 | ③ | 배포 후 검증 |
+| 8 | `ss-triton` 서술이 낡음 | ① | **해소** — 문서 정정 (§13-7) |
+| 9 | 깃과 클러스터 어긋남 가능 | ① | **확인 필요** (§13-8) |
+
+**§13-8 이 13-1 의 선행 조건이다.** 설치 후 다른 담당자가 `prometheus/values.yaml` 을 바꿨고 sync 여부가 확인되지 않았다.
 
 기본 노드 집중은 §11 에 한계로 적어두었다. Loki · Tempo · Alloy 가 올라가면 더 심해진다.
 
@@ -886,6 +892,30 @@ endpoints: [{ port: http, path: /actuator/prometheus }]
 ```
 
 **① 의 것을 지운다.** 앱 메트릭은 앱 소유자가 앱 폴더에서 관리하는 쪽이 경계가 맞다. 수집 측이 앱의 포트 이름과 경로를 알고 있어야 할 이유가 없고, 앱이 바뀔 때 ① 의 파일을 같이 고쳐야 하는 결합이 생긴다.
+
+#### 지울 범위 — 블록 전체가 아니다
+
+`additionalServiceMonitors` 에는 **항목이 둘** 있다.
+
+```
+prometheus/values.yaml:51   ss-be      ← 중복. 제거 대상
+prometheus/values.yaml:64   ss-triton  ← 중복 아님. 지우면 수집이 끊긴다
+```
+
+처음 이 절을 적을 때 `ss-be` 만 보고 "`additionalServiceMonitors` 삭제" 라고 썼다. **블록째 지우면 `ss-triton` 까지 사라진다.** 지울 것은 `ss-be` 항목뿐이다.
+
+#### `Prune` 이 꺼져 있어 자동 삭제되지 않는다
+
+항목을 지우면 차트가 더는 렌더링하지 않지만, **Argo CD 가 기존 리소스를 지우지는 않는다.** §4 에서 `Prune` 을 꺼두었다. §12-3 에서 `monitor` 네임스페이스 잔존 리소스가 `hostPort` 를 쥐고 있던 것과 같은 구조다.
+
+수정 후 손으로 지운다.
+
+```bash
+kubectl -n monitoring get servicemonitors
+kubectl -n monitoring delete servicemonitor <차트가 만든 ss-be 이름>
+```
+
+지우지 않으면 **고치기 전과 똑같이 중복 수집이 계속된다.**
 
 ### 13-2. Grafana sidecar `searchNamespace` — ① · 해소
 
@@ -957,9 +987,62 @@ platform/kube-prometheus-stack/grafana/values.yaml   ← 하위 폴더
 
 `serviceAccount` 의 `role-arn` 지정이 없어 **기본 노드 IAM 역할의 임시 자격 증명**에 의존한다. 그 역할에 S3 권한을 붙이는 것은 **권한 변경이라 승인이 필요하다.**
 
-### 13-7. 다음 할 일
+### 13-7. `ss-triton` 서술이 낡았다 — ① · 문서 수정으로 해소
+
+문서는 "`ss-triton` 은 Service 가 없어 ServiceMonitor 를 주석 처리해 두었다" 고 적고 있었다. **설치 당시에는 맞았고, 지금은 둘 다 틀리다.**
 
 ```
-① 13-1 수정 후 ss-k8s 에 커밋
-③ 13-3 · 13-4 · 13-5 · 13-6 전달 · 네임스페이스 monitoring 확정 공지
+d523bc0  10-27        ① 최초 커밋 — ss-triton 항목을 주석으로 둠      문서 서술이 맞던 시점
+         10-27 20:25  ① 설치 완료 (Healthy + Synced)
+9e86d25  10-27 21:29  asecdycom — Service 추가 + 주석 해제           문서가 낡은 시점
 ```
+
+Service 와 ServiceMonitor 는 서로 **맞는다.**
+
+```yaml
+# apps/ss-triton/02_service.yaml      # prometheus/values.yaml:64
+labels: { app: ss-triton }              selector: { app: ss-triton }   O
+ports: [{ name: http, port: 8001 }]     endpoints: [{ port: http }]    O
+```
+
+다만 **`apps/ss-triton/01_deployment.yaml:9` 이 `replicas: 0`** 이다. 파드가 없으니 Service 에 endpoint 가 없고, **Target 은 여전히 비어 있다.** "Service 가 없어서 대상 0 개" 가 "파드가 없어서 대상 0 개" 로 바뀐 것이고, 보이는 결과는 같다.
+
+§2 · §5-2 · §8 · §9 의 해당 서술을 정정했다.
+
+### 13-8. 깃과 클러스터가 어긋나 있을 수 있다 — ① · 확인 필요
+
+**설치가 끝난 뒤에 `prometheus/values.yaml` 이 한 번 더 바뀌었다.**
+
+```
+10-27 20:25  ① 설치 완료 — 이 시점의 values 가 클러스터에 있다
+10-27 20:32  ai-ncw    7bfe529  retentionSize 1GiB          ① 가 sync 함
+10-27 21:17  jisukim587 c64aba0  ss-be ServiceMonitor · alloy/loki/tempo values
+10-27 21:29  asecdycom  9e86d25  ss-triton ServiceMonitor 활성화   ← values 변경
+```
+
+Argo CD 는 **수동 sync** 다. 20:32 이후로 Sync 를 누르지 않았다면 **돌고 있는 Prometheus 는 `ss-triton` 이 주석인 상태**이고, 깃과 다르다.
+
+이것이 13-1 의 선행 조건이다. 중복 수집도 **양쪽이 모두 적용된 뒤에야** 실제로 발생한다.
+
+```bash
+# 어긋났는지 보는 가장 빠른 방법
+kubectl -n monitoring get servicemonitors
+kubectl -n sayscene  get servicemonitors
+```
+
+| 보이는 것 | 해석 |
+|---|---|
+| `monitoring` 에 `…-ss-be` 하나뿐 | 20:32 상태. 아직 sync 안 됨 → 중복 없음 |
+| `monitoring` 에 `…-ss-be` · `…-ss-triton` + `sayscene` 에 `ss-be` | 모두 sync 됨 → **중복 수집 중** |
+
+Argo CD 카드의 `Synced` 는 **Application 기준**이다. 다른 Application 의 커밋은 이 카드에 나타나지 않으므로, 카드만 보고 판단하면 안 된다.
+
+### 13-9. 다음 할 일
+
+```
+①  13-8 확인      servicemonitors 실제 목록으로 깃·클러스터 일치 여부 판단
+①  13-1 수정      ss-be 항목만 제거 → 커밋 → sync → 손으로 옛 ServiceMonitor 삭제
+③  전달           13-3 · 13-4 · 13-5 · 13-6 · 네임스페이스 monitoring 확정 공지
+```
+
+**13-8 을 먼저 한다.** 어긋난 상태에서 13-1 을 고치면 무엇이 반영된 결과인지 구분할 수 없다.
