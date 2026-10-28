@@ -1,7 +1,7 @@
 # Loki · Tempo · Alloy 설치 전 전달 사항
 
 > 보내는 쪽 ① (kube-prometheus-stack 담당) · 받는 쪽 ③ (로그 · 트레이스 담당)
-> 작성 2026-10-28 · 기준 커밋 `ss-k8s` `8bd5da8`
+> 작성 2026-10-28 · **갱신 2026-10-28 (처리 현황 반영)** · 기준 커밋 `ss-k8s` `c7cec30`
 > 설치 문서: [kube-prometheus-stack-install-v1.md](kube-prometheus-stack-install-v1.md)
 
 `platform/loki` · `platform/tempo` · `platform/alloy` 의 values 를 읽고, **설치 전에 맞춰야 할 것**을 정리했다. 파일에 적어둔 `1번 담당자와 확인` 항목의 답이기도 하다.
@@ -46,15 +46,46 @@ alloy/otlp/values.yaml:26    tempo:4317
 
 | | 항목 | 왜 |
 |---|---|---|
-| A | Grafana 데이터소스 ConfigMap 추가 | 지금은 Loki · Tempo 를 띄워도 Grafana 에서 안 보인다 |
-| B | `values.yaml` 위치 규칙 맞추기 | A 를 둘 자리가 없는 것이 같은 원인 |
-| C | `resources.requests` 명시 | ① 스택과 같은 노드의 같은 여유를 나눠 쓴다 |
-| D | Tempo 디스크 — **새로 발견** | 루트 디스크를 먹어 85% 알림을 터뜨릴 수 있다 |
-| E | Loki S3 권한 검증 | 권한 변경이라 승인이 필요하다 |
+| A | Grafana 데이터소스 ConfigMap 추가 | ✅ **완료** — `12bacd7` |
+| B | `values.yaml` 위치 규칙 맞추기 | ✅ **완료** — `directory.include` 로 해결 |
+| C | `resources.requests` 명시 | ❌ **미처리** — 상황 악화 (아래) |
+| D | Tempo 디스크 | ✅ **완료** — S3 로 전환 |
+| E | Loki S3 권한 검증 | ⚠️ **미처리 · 범위 2배** |
+
+### 2026-10-28 15:59 기준 처리 현황
+
+③ 이 전달 후 작업했다. `12bacd7`(14:13) · `e9f530e`(14:49) · `ab38336`(15:59).
+
+```
+처리됨    A 데이터소스 · B 구조 · D Tempo 디스크
+남음      C resources · E S3 권한
+```
+
+**남은 둘은 모두 "보류" 라고 적힌 채 그대로다.** C 는 Tempo `metricsGenerator` 활성화로 **더 급해졌고**, E 는 Tempo 도 S3 를 쓰게 되어 **승인 대상이 둘로 늘었다.**
 
 ---
 
-## A. Grafana 데이터소스 ConfigMap 이 없다
+## A. Grafana 데이터소스 ConfigMap — ✅ 완료
+
+**`12bacd7` 에서 양쪽 다 추가됐다.**
+
+```
+platform/loki/datasource.yaml     grafana_datasource: "1"
+platform/tempo/datasource.yaml
+```
+
+주소도 FQDN 으로 정확하다.
+
+```
+http://loki-gateway.monitoring.svc.cluster.local:80
+http://tempo.monitoring.svc.cluster.local:3200
+```
+
+Tempo 쪽 주석이 헷갈리기 쉬운 지점을 짚어두었다 — **Grafana 조회는 3200, Alloy 전송은 4317.**
+
+아래는 당시 전달 내용이다. 기록으로 남긴다.
+
+### (전달 당시) 데이터소스 ConfigMap 이 없다
 
 Grafana 쪽 sidecar 는 **이미 켜두었다.**
 
@@ -124,7 +155,20 @@ Service 이름은 release 이름에 따라 달라지므로, 설치 후 `kubectl 
 
 ---
 
-## B. `values.yaml` 이 폴더 최상위에 있다
+## B. `values.yaml` 위치 — ✅ 완료 (다른 방법으로)
+
+**파일을 옮기지 않고 Argo CD 설정으로 풀었다.**
+
+```
+# platform/loki/datasource.yaml 첫 줄
+# Git source: path=platform/loki, directory.include=datasource.yaml, ref=values.
+```
+
+`directory.include` 로 **`datasource.yaml` 만 매니페스트로 렌더링**하고 `values.yaml` 은 제외한다. ① 이 제안한 "폴더 깊이로 구분" 보다 **의도가 명시적이고 폴더 구조를 바꾸지 않아도 된다.** 이쪽이 낫다.
+
+아래는 당시 전달 내용이다.
+
+### (전달 당시) values.yaml 이 폴더 최상위에 있다
 
 ```
 platform/loki/values.yaml                            ← 폴더 최상위
@@ -158,7 +202,27 @@ platform/loki/
 
 ---
 
-## C. `resources.requests` 가 네 파일 모두 없다
+## C. `resources.requests` — ❌ 미처리 · **더 급해졌다**
+
+**네 파일 모두 여전히 0 건**이고 주석의 `적용 보류` 도 그대로다.
+
+그사이 Tempo 에 `metricsGenerator` 가 켜졌다.
+
+```yaml
+# platform/tempo/values.yaml
+metricsGenerator:
+  enabled: true
+  processor.local_blocks:
+    flush_to_storage: true
+```
+
+**metrics-generator 는 들어오는 모든 span 을 받아 집계하므로 메모리를 많이 쓴다.** 거기에 BE Java Agent 추적까지 붙어(`e9f530e`) 유입량도 늘었다.
+
+**제한이 없는 컴포넌트가 노드 메모리를 밀어낼 수 있다.** 같은 노드에 ① 의 Prometheus 와 Alertmanager 가 있다.
+
+아래는 당시 전달 내용이다.
+
+### (전달 당시) resources.requests 가 네 파일 모두 없다
 
 ```
 platform/loki/values.yaml          0 건
@@ -198,7 +262,24 @@ alloy-otlp             50m / 128Mi
 
 ---
 
-## D. Tempo 가 Prometheus 와 같은 디스크를 쓴다 — 새로 발견
+## D. Tempo 디스크 — ✅ 완료
+
+**S3 로 전환됐다.**
+
+```yaml
+storage.trace:
+  backend: s3        # local → s3
+  local: null
+  s3.bucket: ss-tempo-traces-...
+```
+
+루트 디스크를 먹는 문제가 사라졌다. WAL 만 로컬이고 그건 제한적이다.
+
+다만 **S3 를 쓰게 되면서 E 의 승인 대상이 하나 늘었다.**
+
+아래는 당시 전달 내용이다.
+
+### (전달 당시) Tempo 가 Prometheus 와 같은 디스크를 쓴다
 
 values 를 읽다 찾은 것으로, 아직 공유되지 않은 내용이다.
 
@@ -244,7 +325,26 @@ Loki 는 chunk 를 S3 에 보내므로 이 문제가 작지만, `singleBinary.pe
 
 ---
 
-## E. Loki 의 S3 접근은 아직 검증되지 않았다
+## E. S3 권한 — ⚠️ 미처리 · **대상이 둘로 늘었다**
+
+Tempo 도 S3 를 쓰게 되면서 **승인이 필요한 IAM 정책이 둘**이 됐다.
+
+```
+ss-loki-s3-access     버킷 2개 (chunks · ruler)
+ss-tempo-s3-access    버킷 1개 (traces)          ← 새로 추가
+```
+
+양쪽 주석이 같다.
+
+```
+# Pod 의 IMDS·S3 접근은 배포 후 검증한다
+```
+
+역할은 `sayscenecontrolplanerole` **하나**다. 붙이면 **기본 노드의 모든 파드**(Argo CD · Karpenter 포함)가 그 S3 권한을 얻는다. **버킷 범위를 세 개로 제한하는 것이 유일한 방어선이다.**
+
+아래는 당시 전달 내용이다.
+
+### (전달 당시) Loki 의 S3 접근이 검증되지 않았다
 
 ```
 # platform/loki/values.yaml:5
