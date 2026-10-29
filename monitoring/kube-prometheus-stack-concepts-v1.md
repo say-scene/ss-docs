@@ -1,7 +1,15 @@
 # kube-prometheus-stack 개념 정리
 
-> 작성 2026-10-29 · 대상: `ss-k8s/platform/kube-prometheus-stack` 을 처음 읽는 팀원
+> 작성 2026-10-29 · 갱신 2026-10-29 (설치 문서와 사실 대조) · 대상: `ss-k8s/platform/kube-prometheus-stack` 을 처음 읽는 팀원
 > 설치 과정과 결정 배경은 [kube-prometheus-stack-install-v1.md](./kube-prometheus-stack-install-v1.md) 에 있다. 이 문서는 그 설치 문서와 values 파일을 **읽기 위한 개념**만 다룬다.
+>
+> `monitoring/` 의 문서 셋은 역할이 다르다.
+>
+> | 문서 | 답하는 질문 |
+> |---|---|
+> | **concepts** (이 문서) | PV·PVC·바인딩·values 를 **어떻게 읽나** |
+> | [install](./kube-prometheus-stack-install-v1.md) | **왜 이렇게 했나** · 무엇이 막혔나 · 어떻게 쓰나 |
+> | [handover](./loki-tempo-alloy-handover-v1.md) | ③ 담당에게 **무엇을 전달했나** |
 
 ## 1. 한 줄 요약
 
@@ -178,8 +186,9 @@ for: 10m                               → 10분 동안 계속 넘어야 발화
 ```
 
 - 넘으면 먼저 `Pending`, 10분 유지되면 `Firing` 이 된다.
-- `severity: warning` 은 **라벨일 뿐**이다. Alertmanager 수신처가 비어 있어 어디로도 전송되지 않고 UI 에서만 보인다.
+- `severity: warning` 은 **라벨일 뿐**이다. 어디로 갈지는 Alertmanager 의 라우팅이 정한다. **[10-28 갱신] 수신처가 Discord 로 연결되어 실제로 전송된다**(설치 문서 §15-8).
 - node-exporter 가 모든 노드에 있으므로 **워커 노드 디스크도 대상**이다. summary 의 "기본 노드" 문구와 달리 어느 노드인지는 `instance` 라벨로 구분한다.
+- **[10-28 실증]** WSL 노드가 조인한 뒤 그 PC 의 윈도우 드라이브(`/mnt/e`)로 `NodeFilesystemAlmostOutOfSpace` 가 발화했다. 이 지적이 맞다는 증거다. summary 문구는 수정 대상이다.
 - `fstype!~"tmpfs|overlay"` 는 컨테이너용 가상 파일시스템을 빼고 진짜 디스크만 보는 조건이다.
 
 ## 6. 나머지 values 의 공통 패턴
@@ -211,7 +220,7 @@ Prometheus 와 Alertmanager 는 차트가 CR 을 만들고 **Operator 가 Statef
 
 ### Grafana sidecar
 
-`sidecar.datasources` · `dashboards` 를 켜 두면 `grafana_datasource` · `grafana_dashboard` 라벨이 붙은 ConfigMap 을 자동으로 불러온다. ③ 담당이 이 파일을 건드리지 않고 Loki · Tempo 데이터소스를 붙이기 위한 장치다. 해당 ConfigMap 은 아직 없다(설치 문서 §13-3).
+`sidecar.datasources` · `dashboards` 를 켜 두면 `grafana_datasource` · `grafana_dashboard` 라벨이 붙은 ConfigMap 을 자동으로 불러온다. ③ 담당이 이 파일을 건드리지 않고 Loki · Tempo 데이터소스를 붙이기 위한 장치다. **[10-28 갱신] 의도대로 동작했다** — ③ 가 `platform/loki/datasource.yaml` · `platform/tempo/datasource.yaml` 을 추가했고(`12bacd7`), ① 의 파일은 한 줄도 바뀌지 않았다.
 
 ### node-exporter
 

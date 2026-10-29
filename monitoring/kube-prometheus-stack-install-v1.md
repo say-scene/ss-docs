@@ -18,6 +18,16 @@
 | **사용법** | §15 | 접속 · 대시보드 · 쿼리 · 변경 · 알림 수신처 |
 | | §16 | 손으로 만들어야 하는 것 |
 
+**`monitoring/` 의 다른 문서**
+
+| 문서 | 답하는 질문 |
+|---|---|
+| **install** (이 문서) | **왜 이렇게 했나** · 무엇이 막혔나 · 어떻게 쓰나 |
+| [concepts](./kube-prometheus-stack-concepts-v1.md) | PV·PVC·바인딩·values 를 **어떻게 읽나** |
+| [handover](./loki-tempo-alloy-handover-v1.md) | ③ 담당에게 **무엇을 전달했나** |
+
+개념 문서는 다른 담당자가 2026-10-29 에 추가했다. **이 문서를 읽기 전에 보면 좋다** — `storageSpec` · `nodeAffinity` · `nodeSelector` 대 toleration 같은 개념을 먼저 정리해 준다.
+
 **자주 찾는 것**
 
 ```
@@ -995,6 +1005,8 @@ ssh -i <키> -L 3000:localhost:3000 ec2-user@<기본 노드 EIP>
 | 8 | `ss-triton` 서술이 낡음 | ① | **해소** — 문서 정정 (§13-7) |
 | 9 | 깃과 클러스터 어긋남 가능 | ① | **해소** — 양쪽 sync 확인 (§13-8) |
 | 10 | CNI 충돌로 스택 전체 정지 | 외부 | ✅ **해소** — 원인 조치는 미확인 (§13-9) |
+| 11 | PodMonitor · Probe 선택 조건 미설정 | ① | 🔴 **미해소** — §13-11 |
+| 12 | 디스크 알림 summary 가 오해를 준다 | ① | 🔴 **미해소** — §13-11 |
 
 §13-8 로 양쪽 Application 이 모두 sync 되어 있음을 확인했고, **중복 수집이 실제로 발생 중**이었다. 13-1 을 깃에 반영했다 (`21f55fa`).
 
@@ -1399,6 +1411,53 @@ cilium · aws-node      파드 재생성 흔적 없음
 Argo CD 밖에서 들어온 변경은 깃에 흔적이 없다
 클러스터 수준 구성 요소를 helm 으로 직접 설치하지 않는다
 ```
+
+### 13-11. 개념 문서가 짚은 것 — ① · 미해소
+
+다른 담당자가 `kube-prometheus-stack-concepts-v1.md` 를 쓰면서 **① 의 values 에 있는 구멍 둘**을 찾아냈다. 실측으로 확인했다.
+
+#### 11. PodMonitor · Probe 는 열어두지 않았다
+
+```
+serviceMonitorSelectorNilUsesHelmValues: false    설정함
+ruleSelectorNilUsesHelmValues: false              설정함
+podMonitorSelectorNilUsesHelmValues               없음 → 기본값 true
+probeSelectorNilUsesHelmValues                    없음 → 기본값 true
+```
+
+ServiceMonitor 와 PrometheusRule 만 release 라벨 없이 받도록 열어두었다. **다른 담당자가 PodMonitor 를 만들면 라벨이 없어 조용히 무시된다.** 에러가 나지 않아 알아채기 어렵다.
+
+`ss-be` · `ss-triton` 은 Service 가 있어 ServiceMonitor 로 되지만, **Service 없는 워크로드**를 수집하려면 PodMonitor 가 필요하다. 그때 막힌다.
+
+```yaml
+# prometheus/values.yaml 에 두 줄을 더하면 된다
+podMonitorSelectorNilUsesHelmValues: false
+probeSelectorNilUsesHelmValues: false
+```
+
+#### 12. 디스크 알림 summary 가 "기본 노드" 라고 말한다
+
+```promql
+node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
+```
+
+**노드를 거르는 조건이 없다.** node-exporter 는 모든 노드에 뜨므로 **모든 노드의 루트 디스크**가 대상이다. 그런데 문구는 이렇다.
+
+```yaml
+summary: "기본 노드 루트 디스크 85% 초과"
+```
+
+10-28 에 WSL 노드가 조인한 뒤 **그 PC 의 윈도우 드라이브(`/mnt/e`)로 알림이 발화**했다. 규칙은 의도대로 동작했는데 **문구가 오해를 주고 있었다.**
+
+```yaml
+# 고칠 문구
+summary: "노드 루트 디스크 85% 초과"
+description: "어느 노드인지는 instance 라벨로 확인한다. 보존을 줄이거나 전용 볼륨으로 옮긴다."
+```
+
+#### 교훈
+
+**둘 다 "에러가 안 나서 몰랐던 것"** 이다. 11 은 조용히 무시되고, 12 는 잘못된 문구로 조용히 오해를 준다. 다른 사람이 같은 파일을 읽어주지 않았으면 더 늦게 발견했을 것이다.
 
 ### 13-10. 다음 할 일
 
