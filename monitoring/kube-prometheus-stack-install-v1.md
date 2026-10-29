@@ -24,7 +24,7 @@
 |---|---|
 | **install** (이 문서) | **왜 이렇게 했나** · 무엇이 막혔나 · 어떻게 쓰나 |
 | [concepts](./kube-prometheus-stack-concepts-v1.md) | PV·PVC·바인딩·values 를 **어떻게 읽나** |
-| [handover](./loki-tempo-alloy-handover-v1.md) | ③ 담당에게 **무엇을 전달했나** |
+| [observability-manual](./sayscene-observability-manual-v1.md) | Loki · Tempo · Alloy 를 **어떻게 설치·운영하나** (③ 작성) |
 
 개념 문서는 다른 담당자가 2026-10-29 에 추가했다. **이 문서를 읽기 전에 보면 좋다** — `storageSpec` · `nodeAffinity` · `nodeSelector` 대 toleration 같은 개념을 먼저 정리해 준다.
 
@@ -1005,8 +1005,8 @@ ssh -i <키> -L 3000:localhost:3000 ec2-user@<기본 노드 EIP>
 | 8 | `ss-triton` 서술이 낡음 | ① | **해소** — 문서 정정 (§13-7) |
 | 9 | 깃과 클러스터 어긋남 가능 | ① | **해소** — 양쪽 sync 확인 (§13-8) |
 | 10 | CNI 충돌로 스택 전체 정지 | 외부 | ✅ **해소** — 원인 조치는 미확인 (§13-9) |
-| 11 | PodMonitor · Probe 선택 조건 미설정 | ① | 🔴 **미해소** — §13-11 |
-| 12 | 디스크 알림 summary 가 오해를 준다 | ① | 🔴 **미해소** — §13-11 |
+| 11 | PodMonitor · Probe 선택 조건 미설정 | ① | ⬜ **이슈 아님** — 쓰는 데 없음. 메모 (§13-11) |
+| 12 | 디스코드 알림 문구가 노드를 단정한다 | ① | ✅ **해소** — `ss-k8s` b0faff9 (§13-11) |
 
 §13-8 로 양쪽 Application 이 모두 sync 되어 있음을 확인했고, **중복 수집이 실제로 발생 중**이었다. 13-1 을 깃에 반영했다 (`21f55fa`).
 
@@ -1412,11 +1412,11 @@ Argo CD 밖에서 들어온 변경은 깃에 흔적이 없다
 클러스터 수준 구성 요소를 helm 으로 직접 설치하지 않는다
 ```
 
-### 13-11. 개념 문서가 짚은 것 — ① · 미해소
+### 13-11. 개념 문서가 짚은 것 — ①
 
-다른 담당자가 `kube-prometheus-stack-concepts-v1.md` 를 쓰면서 **① 의 values 에 있는 구멍 둘**을 찾아냈다. 실측으로 확인했다.
+다른 담당자가 `kube-prometheus-stack-concepts-v1.md` 를 쓰면서 **① 의 values 두 곳**을 짚었다. 실측으로 확인한 결과 **하나는 이슈가 아니고, 하나는 실제 결함**이다.
 
-#### 11. PodMonitor · Probe 는 열어두지 않았다
+#### 11. PodMonitor · Probe 선택 조건 — 이슈 아님. 메모로 남긴다
 
 ```
 serviceMonitorSelectorNilUsesHelmValues: false    설정함
@@ -1425,50 +1425,67 @@ podMonitorSelectorNilUsesHelmValues               없음 → 기본값 true
 probeSelectorNilUsesHelmValues                    없음 → 기본값 true
 ```
 
-ServiceMonitor 와 PrometheusRule 만 release 라벨 없이 받도록 열어두었다. **다른 담당자가 PodMonitor 를 만들면 라벨이 없어 조용히 무시된다.** 에러가 나지 않아 알아채기 어렵다.
+ServiceMonitor 와 PrometheusRule 만 release 라벨 없이 받도록 열어두었다.
 
-`ss-be` · `ss-triton` 은 Service 가 있어 ServiceMonitor 로 되지만, **Service 없는 워크로드**를 수집하려면 PodMonitor 가 필요하다. 그때 막힌다.
+**지금 PodMonitor 를 쓰는 데가 없고, 쓸 계획도 없다.** `ss-be` · `ss-triton` 은 Service 가 있어 ServiceMonitor 로 수집된다. PodMonitor 는 Service 없는 워크로드(Job · 배치)를 파드에서 바로 긁을 때 쓰는 것이고, 이 클러스터에는 그런 대상이 없다.
+
+그래서 **이슈 번호를 붙일 일이 아니었다.** 쓰게 되는 날 두 줄을 더하면 끝난다는 메모로 충분하다.
 
 ```yaml
-# prometheus/values.yaml 에 두 줄을 더하면 된다
+# 나중에 PodMonitor · Probe 를 쓰게 되면 그때 더한다
 podMonitorSelectorNilUsesHelmValues: false
 probeSelectorNilUsesHelmValues: false
 ```
 
-#### 12. 디스크 알림 summary 가 "기본 노드" 라고 말한다
+열어두지 않은 채 PodMonitor 를 만들면 **에러 없이 조용히 무시된다**는 점만 기억하면 된다.
+
+#### 12. 디스코드 알림 문구가 노드를 단정한다 — 실제 결함
 
 ```promql
 node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
 ```
 
-**노드를 거르는 조건이 없다.** node-exporter 는 모든 노드에 뜨므로 **모든 노드의 루트 디스크**가 대상이다. 그런데 문구는 이렇다.
+`mountpoint="/"` 가 있으니 **루트 파일시스템만** 본다. 하지만 **노드를 거르는 조건은 없다.** node-exporter 는 모든 노드에 뜨므로 **모든 노드의 루트**가 대상이다. 그런데 문구는 이렇다.
 
 ```yaml
 summary: "기본 노드 루트 디스크 85% 초과"
+description: "Prometheus 보존을 줄이거나 전용 볼륨으로 옮긴다."
 ```
 
-10-28 에 WSL 노드가 조인한 뒤 **그 PC 의 윈도우 드라이브(`/mnt/e`)로 알림이 발화**했다. 규칙은 의도대로 동작했는데 **문구가 오해를 주고 있었다.**
+10-28 에 WSL 노드가 조인했다. **그 노드의 루트가 85% 를 넘으면 디스코드에는 "기본 노드" 라고 온다.** 엉뚱한 서버의 디스크를 비우러 가게 된다. `description` 에도 어느 노드인지가 없어서 메시지만 보고는 구분할 수 없다.
 
 ```yaml
-# 고칠 문구
+# 고칠 두 줄
 summary: "노드 루트 디스크 85% 초과"
-description: "어느 노드인지는 instance 라벨로 확인한다. 보존을 줄이거나 전용 볼륨으로 옮긴다."
+description: "{{ $labels.instance }} 의 루트 디스크가 85% 를 넘었다. 기본 노드면 Prometheus 보존을 줄이거나 전용 볼륨으로 옮긴다."
 ```
+
+`{{ $labels.instance }}` 를 넣으면 알림 본문에 노드가 찍힌다. **규칙(`expr` · `for`)은 그대로 둔다.** 모든 노드의 루트를 보는 것은 의도한 동작이고, 좁히면 WSL 노드가 감시에서 빠진다.
+
+**10-29 조치 완료** — `ss-k8s` 에 반영했다 (`fix/node-disk-alert-message` → main `b0faff9`). 머리말 주석의 `16G 중 7.3G 여유` 도 함께 고쳤다. 10-28 에 60G 로 확장해 숫자가 낡았고, 여유 용량은 적는 순간부터 낡으므로 값 대신 확인 명령(`df -h /`)만 남겼다. 공개 저장소라는 점도 고려했다.
+
+적용에는 **Argo CD 수동 Sync** 가 필요하다. Sync 전까지 알림은 여전히 `기본 노드` 라고 온다.
+
+> **10-29 정정** — 이 절에 "WSL 노드의 윈도우 드라이브(`/mnt/e`)로 알림이 발화했다" 고 적어두었으나 **이 규칙이 보낸 알림이 아니다.** `expr` 에 `mountpoint="/"` 가 있어 `/mnt/e` 는 애초에 매칭되지 않는다. 그 알림은 차트 기본 규칙(`NodeFilesystemSpaceFillingUp` 계열, mountpoint 제한 없음)이 보낸 것이다. 결함 자체(문구가 노드를 단정함)는 그대로 유효하다.
 
 #### 교훈
 
-**둘 다 "에러가 안 나서 몰랐던 것"** 이다. 11 은 조용히 무시되고, 12 는 잘못된 문구로 조용히 오해를 준다. 다른 사람이 같은 파일을 읽어주지 않았으면 더 늦게 발견했을 것이다.
+**둘 다 "에러가 안 나서 몰랐던 것"** 이다. 11 은 열어두지 않으면 조용히 무시되고, 12 는 잘못된 문구로 조용히 오해를 준다.
+
+동시에 **남이 짚어준 것을 그대로 이슈로 올리면 안 된다**는 것도 배웠다. 11 은 확인해 보니 지금 쓰는 데가 없어 이슈가 아니었다. 짚어준 것과 지금 고쳐야 하는 것은 다르다.
 
 ### 13-10. 다음 할 일
 
 ```
 완료
   13-1  ServiceMonitor 중복      깃(21f55fa · 8bd5da8) + 클러스터 반영 확인
+  13-11 디스크 알림 문구          깃(89d8bce · b0faff9). Argo CD Sync 필요
+  13-11 PodMonitor               이슈 아닌 것으로 결론. 메모로 내림
   13-8  깃·클러스터 일치 확인
   13-9  CNI 충돌                 복구됨. 단 원인 조치 미확인
   §5-0  전환 여부                지금은 하지 않기로 결정. 기준의 한계를 주석으로 남김
   §14-7 retention                7d · 1GiB 그대로 두기로 결정
-  ③ 전달                        loki-tempo-alloy-handover-v1.md
+  ③ 전달                        전달 문서는 ③ 의 관측성 매뉴얼로 흡수됨 (A~E 표)
 
 ③ 가 처리한 것 (10-28 확인)
   데이터소스 ConfigMap            loki/tempo 둘 다 추가 (12bacd7)
