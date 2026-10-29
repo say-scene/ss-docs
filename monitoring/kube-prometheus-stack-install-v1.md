@@ -1,6 +1,6 @@
 # kube-prometheus-stack 설치 문서
 
-> 담당 ① · 작성 2026-10-27 · 갱신 2026-10-28 (배포 후 리뷰 · CNI 장애 · 사용법 · 알림 수신처 · **외부 노출 검토**) · 상태: **설치 완료 (2026-10-27 20:25, `Healthy` + `Synced`)**
+> 담당 ① · 작성 2026-10-27 · 갱신 2026-10-29 (**Grafana 비밀번호·저장소·배포 전략** §12-8) · 2026-10-28 (배포 후 리뷰 · CNI 장애 · 사용법 · 알림 수신처 · 외부 노출 검토) · 상태: **설치 완료 (2026-10-27 20:25, `Healthy` + `Synced`)**
 > 클러스터 전반은 [al2023-cpu-cluster-karpenter-guide.md](../al2023-cpu-cluster-karpenter-guide.md)
 > 배경과 팀 분담 검토(`관측성-검토.md`)·클러스터 구성 정리(`클러스터구성.md`)는 ① 담당 로컬 문서로, 이 저장소에 없다.
 
@@ -12,7 +12,7 @@
 | **설치** | §6~§8 | 사전 점검 · 설치 순서 · 확인 순서 |
 | **결정** | §9 | 결정 사항 · 네임스페이스 통일 · 외부 노출 검토 |
 | **운영** | §10~§11 | 작업 분담 · 알려진 한계 |
-| **기록** | §12 | 설치 중 막힌 것 5건 |
+| **기록** | §12 | 설치 중 막힌 것 5건 · **Grafana 비밀번호·저장소** (§12-8) |
 | | §13 | 배포 후 리뷰 — 이슈 10건 · CNI 장애 |
 | **참고** | §14 | Prometheus 는 무엇을 하고 왜 S3 를 못 쓰나 |
 | **사용법** | §15 | 접속 · 대시보드 · 쿼리 · 변경 · 알림 수신처 |
@@ -34,6 +34,7 @@
 접속하려면              §15-1
 알림이 왔는데 뭔지        §15-3 · §14-5
 설정을 바꾸려면           §15-5
+Grafana 비밀번호를 모르겠다 §12-8
 알림 수신처를 바꾸려면     §15-8
 클러스터를 다시 만든다면   §16
 왜 이렇게 설계했나        §14 · §9-1
@@ -142,10 +143,12 @@ PV 는 `nodeAffinity` 로 기본 노드에 묶는다. 그 경로가 거기에만
 **설치 전에 기본 노드에서 한 번 실행해야 한다.**
 
 ```bash
-sudo mkdir -p /var/lib/prometheus
+sudo mkdir -p /var/lib/prometheus /var/lib/grafana
 ```
 
 local PV 는 `hostPath` 의 `DirectoryOrCreate` 와 달리 **디렉터리를 만들어주지 않는다.** 없으면 `FailedMount: path does not exist` 로 멈춘다. 소유권은 `fsGroup` 이 맞추므로 `chown` 은 필요 없다 — 설치 후 `drwxrwsr-x root 2000` 으로 확인했다.
+
+**2026-10-29 에 Grafana 도 같은 방식을 쓴다.** `grafana.db` 가 `emptyDir` 위에 있어 파드가 다시 만들어질 때마다 대시보드가 사라졌다. `grafana-local` PV **2Gi** 를 `/var/lib/grafana` 에 붙였다. StorageClass 는 `local-prometheus` 를 재사용한다 — `no-provisioner` 라 이름표 역할만 하고 따로 만들면 같은 내용이 하나 더 생긴다. 자세한 것은 §12-8.
 
 **대가는 디스크 위험이다.** 디스크가 차면 Prometheus 만 죽는 것이 아니라 **같은 노드의 Argo CD · Karpenter · CoreDNS 가 전부 위험해진다.** 그래서 조건 둘을 붙인다.
 
@@ -321,6 +324,21 @@ grafana:
 `grafana.ini` 의 `root_url` · `serve_from_sub_path` 는 **외부 노출(2 단계)에서 더한다.** 1 단계에서는 `port-forward` 로 보므로 필요 없다.
 
 **`sidecar.datasources` 는 반드시 켠다.** 이것이 켜져 있으면 ③ 담당이 Loki·Tempo 데이터소스를 **자기 폴더의 ConfigMap 으로** 붙일 수 있다. 꺼져 있으면 ③ 이 이 파일을 고쳐야 해서 담당 경계가 겹친다.
+
+**2026-10-29 에 세 가지를 더했다** (§12-8).
+
+```yaml
+  admin:
+    existingSecret: grafana-admin       # 비밀번호는 깃에 두지 않는다
+  persistence:
+    enabled: true                       # 대시보드가 파드 재생성에서 살아남는다
+    storageClassName: local-prometheus
+    size: 2Gi
+  deploymentStrategy:
+    type: Recreate                      # 두 파드가 같은 SQLite 를 열지 않게
+```
+
+`sidecar.dashboards` 도 함께 켰다. 데이터소스와 같은 구조라 ③ 이 자기 폴더의 ConfigMap 으로 대시보드를 붙일 수 있다.
 
 ### 5-4. alertmanager/values.yaml
 
@@ -757,21 +775,13 @@ HTTPS                     ALB 는 HTTP 80 만. CloudFront 가 앞에서 종단�
 
 Grafana 를 열면 **prefix list + 로그인**으로 두 겹이 된다. Prometheus · Alertmanager 는 **한 겹뿐**이다.
 
-#### 선행 조건 — 비밀번호를 먼저 고쳐야 한다
+#### 선행 조건 — 비밀번호 고정 · **2026-10-29 해소**
 
-지금은 Sync 마다 비밀번호가 어긋나고 `reset-admin-password` 로 푼다(§12-6). **혼자 터널로 쓸 때는 괜찮았다.**
+당시에는 Sync 마다 비밀번호가 어긋났다. 외부에 열고 여러 명이 쓰면 **Sync 할 때마다 아무도 못 들어간다.** 열기 전에 고정해야 했다.
 
-외부에 열고 여러 명이 쓰면 **Sync 할 때마다 아무도 못 들어간다.** 열기 전에 반드시 고정해야 한다.
+**2026-10-29 에 적용했다**(§12-8). `admin.existingSecret: grafana-admin` 이고, 값은 클러스터의 Secret 에만 있다. Discord webhook 과 같은 패턴이다(§15-8). §16 의 수동 항목이 하나 늘었다.
 
-```yaml
-grafana:
-  admin:
-    existingSecret: grafana-admin
-    userKey: admin-user
-    passwordKey: admin-password
-```
-
-Discord webhook 과 같은 패턴이다(§15-8). §16 의 수동 항목이 하나 는다.
+**외부 노출의 선행 조건은 이제 `X-Origin-Verify` 하나만 남았다.**
 
 #### 남은 미결 — `X-Origin-Verify`
 
@@ -957,9 +967,9 @@ grafana:
     passwordKey: admin-password
 ```
 
-#### 결정: 보류
+#### 결정: 보류 → **2026-10-29 적용** (§12-8)
 
-**적용하지 않는다.** 이유는 셋이다.
+당시 판단은 "적용하지 않는다" 였다. 이유는 셋이었다.
 
 ```
 Argo CD 가 관리하지 않는 Secret 에 의존하게 된다
@@ -967,11 +977,11 @@ Argo CD 가 관리하지 않는 Secret 에 의존하게 된다
 지금 Grafana 는 port-forward 로만 접근하고 사용자는 혼자다
 ```
 
-`/var/lib/prometheus` 디렉터리와 같은 성격의 **수동 전제가 하나 더 생기는데**, 지금 얻는 것이 그만큼 크지 않다.
+**세 이유 모두 지금도 사실이다.** 그런데 뒤집었다. 보류의 전제가 "`reset-admin-password` 로 버틴다" 였는데, **그 명령이 애초에 동작하지 않았기 때문이다.** `grafana.db` 만 고치고 Secret 은 그대로 두는데, `persistence` 가 꺼져 있어 DB 가 `emptyDir` 위에 있었다. 파드가 다시 뜨면 원래대로 돌아갔다.
 
-**다시 볼 시점은 외부 노출(§7 2 단계) 때다.** 그때는 여러 사람이 쓰게 되고 비밀번호가 Sync 마다 바뀌는 상태를 유지할 수 없다. 외부 노출과 묶어 한 번에 처리한다.
+즉 **현재 운영 방식이라고 적어둔 것이 운영되지 않는 상태였다.** 외부 노출까지 미룰 근거가 사라졌다.
 
-그때까지는 Sync 후 로그인이 안 되면 **`reset-admin-password` 를 다시 실행한다.** 그것이 현재 운영 방식이다.
+§12-8 에 적용 내용을 적는다.
 
 ### 12-7. Grafana 접속 주의
 
@@ -986,6 +996,138 @@ ssh -i <키> -L 3000:localhost:3000 ec2-user@<기본 노드 EIP>
 터널을 띄운 뒤 **그 노드에서 `port-forward` 가 돌고 있어야** 브라우저의 `localhost:3000` 이 연결된다.
 
 외부 노출(§7 2 단계)을 하면 이 과정이 없어진다. 현재는 보류 상태다.
+
+---
+
+### 12-8. Grafana 비밀번호·저장소·배포 전략 — 2026-10-29
+
+세 가지를 한 번에 바꿨다. **셋은 서로 묶여 있다.**
+
+```
+비밀번호를 Secret 으로 고정   →  Sync 가 일어남  →  롤아웃  →  대시보드 유실
+                                                        ↓
+                                        저장소를 PV 로 옮겨야 한다
+                                                        ↓
+                                        PV 를 쓰면 롤링 중 두 파드가 같은 DB 를 연다
+                                                        ↓
+                                                   Recreate
+```
+
+#### 발단 — 보류가 보류되지 않았다
+
+§12-6 은 "로그인이 안 되면 `reset-admin-password` 를 다시 실행한다" 를 현재 운영 방식으로 적었다. **그 명령은 `grafana.db` 만 고치고 Secret 은 건드리지 않는다.** `persistence` 가 꺼져 있어 그 DB 는 `emptyDir` 위에 있었다. 파드가 다시 만들어지면 Grafana 가 `GF_SECURITY_ADMIN_PASSWORD` 로 다시 덮어썼다.
+
+**버티는 방법이 없었다.** 그래서 미룰 수 없었다.
+
+#### ① 비밀번호 — `admin.existingSecret`
+
+```yaml
+# grafana/values.yaml
+  admin:
+    existingSecret: grafana-admin
+```
+
+`userKey` · `passwordKey` 는 적지 않는다. 차트 기본값이 `admin-user` · `admin-password` 이고 Secret 을 그 키 이름으로 만들었다.
+
+Secret 은 손으로 만든다. **값은 깃에 들어가지 않는다. `ss-k8s` 는 공개 저장소다.**
+
+```bash
+read -rsp '비밀번호: ' PW && echo && kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-admin
+  namespace: monitoring
+type: Opaque
+stringData:
+  admin-user: admin
+  admin-password: "$PW"
+EOF
+unset PW
+```
+
+`read -rs` 라 화면과 히스토리에 남지 않고, heredoc 이라 **표준입력으로 들어가 `ps` 에도 보이지 않는다.** `--from-literal` 을 쓰면 명령줄 인자가 되어 그 순간 `ps` 에 평문이 보인다.
+
+검증은 Secret 값을 읽는 것이 아니라 **Deployment 가 그 Secret 을 참조하는지**로 했다.
+
+```
+{"name":"GF_SECURITY_ADMIN_PASSWORD",
+ "valueFrom":{"secretKeyRef":{"key":"admin-password","name":"grafana-admin"}}}
+```
+
+> **정정이 필요한 것** — `ss-k8s` 의 커밋 `e51f70b` 메시지에 "차트 기본값은 문서에 공개된 문자열" 이라고 적었다. **확인하지 않고 쓴 문장이다.** §12-6 이 실측한 것은 "Sync 마다 값이 바뀐다" 였고, 그쪽이 렌더 시점 생성을 가리킨다. 둘은 양립하지 않는다. 바꿔야 할 이유(깃 바깥에서 값이 떠다닌다)는 어느 쪽이든 같지만, **근거로 적은 문장은 검증되지 않았다.**
+
+#### ② 저장소 — `grafana-local` PV 2Gi
+
+```yaml
+# grafana/values.yaml
+  persistence:
+    enabled: true
+    storageClassName: local-prometheus
+    size: 2Gi
+```
+
+`storage.yaml` 에 PV 를 더했다. 구조는 `prometheus-local` 과 같다 — `no-provisioner` · `WaitForFirstConsumer` · `Retain` · 기본 노드 `nodeAffinity`.
+
+**설치 전에 디렉터리가 있어야 한다.** 없으면 `FailedMount` 로 멈춘다.
+
+```bash
+sudo mkdir -p /var/lib/grafana
+```
+
+Grafana 는 `nodeSelector` 로 이미 기본 노드에 고정돼 있어 PV 의 `nodeAffinity` 와 맞는다. 따로 맞출 것이 없었다.
+
+**검증은 파드를 실제로 지워서 했다.**
+
+```bash
+kubectl delete pod -n monitoring -l app.kubernetes.io/name=grafana
+```
+
+파드 UID 가 바뀌므로 `emptyDir` 였다면 반드시 사라진다. 대시보드와 태그가 남았다. **추정이 아니라 실측이다.**
+
+#### ③ 배포 전략 — `Recreate`
+
+```yaml
+# grafana/values.yaml
+  deploymentStrategy:
+    type: Recreate
+```
+
+차트 기본값 `RollingUpdate` 는 새 파드를 먼저 띄우고 옛 파드를 내린다. 그 사이 **두 파드가 같은 `grafana.db` 를 동시에 연다.**
+
+`ReadWriteOnce` 는 **"노드 하나" 라는 뜻이지 "파드 하나" 가 아니다.** 둘 다 기본 노드에 뜨므로 접근 모드가 막아주지 못한다. `grafana.db` 는 SQLite 다.
+
+```
+얻음   DB 를 항상 한 프로세스만 연다
+잃음   배포 중 수십 초 중단. 그동안에도 Prometheus 는 계속 수집한다
+```
+
+**실제로 깨진 사례를 확인한 것은 아니다.** 동시 쓰기 창을 열어둘 이유가 없고 닫는 비용이 3 줄이라 닫았다.
+
+#### 대가 — 수동 전제가 둘 늘었다
+
+§12-6 이 보류한 이유 그대로다. 피한 것이 아니라 **받아들였다.**
+
+```
+/var/lib/grafana 디렉터리    §16 1 번에 합침
+grafana-admin Secret         §16 3 번
+```
+
+§16-1 의 Sealed Secrets · External Secrets 설계가 그만큼 더 필요해졌다.
+
+#### 중간에 되돌린 것 — 대시보드 ConfigMap
+
+처음에는 대시보드를 **ConfigMap 으로 깃에 넣는 방법**을 택했다 (`sidecar.dashboards` 가 주워간다). 12239 를 794 줄 YAML 로 만들어 커밋까지 했다가 되돌렸다.
+
+```
+문제 1   하위 폴더에 두어 Argo CD 가 읽지도 않았다 — 디렉터리 스캔은 비재귀다
+문제 2   794 줄 JSON 을 사람이 들고 다녀야 한다
+문제 3   프로비저닝된 대시보드는 UI 에서 Save 가 막힌다
+```
+
+**셋째가 결정적이었다.** Grafana 를 쓰는 정상적인 방식이 아니다. 저장소를 고치는 것이 맞는 해결이었다. 대시보드는 Grafana 가 PV 에 저장하고, 깃에는 두지 않는다.
+
+"어떤 대시보드를 넣었는가" 는 §15-2 의 표로 남긴다.
 
 ---
 
@@ -1790,6 +1932,20 @@ Kubernetes / Persistent Volumes                    PV 사용률
 
 **"어느 파드가 메모리를 먹나"** 는 세 번째에서 바로 보인다.
 
+#### 손으로 넣은 대시보드
+
+차트가 안 만드는 것만 적는다. **클러스터를 다시 만들면 이 표를 보고 다시 넣는다.**
+
+| ID | 이름 | 태그 | 넣은 날 |
+|---|---|---|---|
+| 12239 | NVIDIA DCGM Exporter Dashboard | `gpu` · `dcgm` | 2026-10-29 |
+
+```
+Grafana → Dashboards → New → Import → ID 입력 → Load → Prometheus 선택 → Import
+```
+
+**UI 에서 만들고 고친 것은 `grafana-local` PV 에 저장된다** (§12-8). 파드가 다시 만들어져도 남는다. 다만 **노드를 교체하면 사라진다** — Prometheus TSDB 와 같은 조건이다. 잃고 싶지 않은 것은 `Share → Export` 로 JSON 을 받아 둔다.
+
 ### 15-3. Prometheus UI — 상태를 보는 곳
 
 #### Status → Targets — 가장 먼저 볼 곳
@@ -2222,9 +2378,10 @@ Secret 으로 분리해 두어서 **클러스터에서 한 줄로 끝난다.** �
 
 | | 항목 | 없으면 | 절차 |
 |---|---|---|---|
-| 1 | `/var/lib/prometheus` 디렉터리 | Prometheus `FailedMount` | §12-5 |
+| 1 | `/var/lib/prometheus` · `/var/lib/grafana` 디렉터리 | Prometheus · Grafana `FailedMount` | §5-0 · §12-8 |
 | 2 | `alertmanager-discord` Secret | Alertmanager 파드가 안 뜸 | §15-8 A |
-| 3 | Grafana admin 비밀번호 | 로그인 불가 | §12-6 |
+| 3 | `grafana-admin` Secret | Grafana 파드가 안 뜸 | §12-8 |
+| 4 | 손으로 넣은 대시보드 | 그 대시보드만 없음 | §15-2 |
 
 ```bash
 # 1
@@ -2234,12 +2391,24 @@ sudo mkdir -p /var/lib/prometheus
 kubectl -n monitoring create secret generic alertmanager-discord \
   --from-literal=url='<Discord webhook URL>'
 
-# 3
-kubectl -n monitoring exec -it deploy/kube-prometheus-stack-grafana -c grafana -- \
-  grafana cli admin reset-admin-password '<비밀번호>'
+# 3  read -rs 라 화면·히스토리에 남지 않고, 표준입력이라 ps 에도 안 보인다
+read -rsp '비밀번호: ' PW && echo && kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-admin
+  namespace: monitoring
+type: Opaque
+stringData:
+  admin-user: admin
+  admin-password: "$PW"
+EOF
+unset PW
 ```
 
-**1 과 2 는 설치 전에 해야 한다.** 없으면 파드가 뜨지 않는다. 3 은 필요할 때 한다.
+**1 · 2 · 3 은 설치 전에 해야 한다.** 없으면 파드가 뜨지 않는다. 4 는 설치 후에 한다.
+
+`grafana cli admin reset-admin-password` 는 쓰지 않는다. `grafana.db` 만 고치고 Secret 은 그대로 두어 **파드가 다시 뜨면 되돌아간다** (§12-8).
 
 ### 16-1. 이 목록을 없애는 방법 — 조사해 둔 설계
 
