@@ -1,7 +1,7 @@
 # CPU Whisper STT 세팅 매뉴얼
 
-> 상태: **운영 중 (실도메인 연동 확인, 간헐 오류 원인 미확인)** · 작성일: 2026-10-28
-> 관련: [2026-10-27 이슈 기록](../issue/20261027/README.md) · ss-triton tag `triton-gpu-v1`(교체 전 GPU Triton 원본)
+> 상태: **운영 중 (실도메인 연동 확인, 간헐 오류 원인 미확인)** · 작성일: 2026-10-28 · 갱신 2026-10-29 (전용 노드 이전 · 스레드 조합 실측 · KEDA 자동 확장)
+> 관련: [2026-10-27 이슈 기록](../issue/20261027/README.md) · [KEDA 설치 매뉴얼](keda-install-v1.md) · ss-triton tag `triton-gpu-v1`(교체 전 GPU Triton 원본)
 
 ---
 
@@ -9,7 +9,8 @@
 
 - GPU quota 미승인으로 Triton(Qwen3-8B FP8 + Whisper GPU)을 걷어내고, **ss-triton 레포 내용을 CPU Whisper STT 서버로 교체**했다.
 - **이름은 `ss-triton`을 유지한다.** 레포·ECR·IAM·CI·ss-k8s 경로(`apps/ss-triton`)를 그대로 쓰기 위해서다. Pod·Service·이미지 이름은 `ss-triton`이지만 내용은 Whisper STT다.
-- STT는 **control plane 노드(t3.xlarge)** 에 CPU limit 2로 올린다. LLM(vLLM)은 별도 m7i 노드(`apps/llm`)에서 돈다.
+- STT는 **전용 Karpenter NodePool `stt`(t3.large)** 에 노드 1대당 Pod 1개로 올린다. **KEDA가 부하에 따라 1~2개로 늘리고 줄인다.** LLM(vLLM)은 별도 m7i 노드(`apps/llm`)에서 돈다.
+  - 2026-10-28까지는 control plane(t3.xlarge)에 CPU limit 2로 두었다. 2026-10-29 전용 노드로 옮겼다(§2).
 - ss-be와의 계약(KServe v2 JSON, `POST /v2/models/whisper_stt/infer`)은 Triton 시절과 같아 **BE 코드 변경은 없다.** 주소만 `STT_BASE_URL`로 바꿨다.
 
 ---
@@ -22,10 +23,12 @@
                                                      ▼
                                     Service ss-triton:8001 (ClusterIP)
                                                      ▼
-                                    Pod ss-triton (control plane, whisper_server.py)
+                                    Pod ss-triton × 1~2 (stt 노드 t3.large, whisper_server.py)
                                       ├ POST /v2/models/whisper_stt/infer
                                       ├ GET  /health
                                       └ GET  /metrics  ◀── Prometheus (ServiceMonitor ss-triton)
+                                                            ▲
+                                    KEDA ScaledObject ss-triton ─ PromQL로 Pod 수 결정
 ```
 
 | 위치 | 파일 | 역할 |
@@ -34,7 +37,9 @@
 | ss-triton | `Dockerfile` | `python:3.12-slim`, 비root(uid 10001), 모델은 기동 시 HF에서 받음 |
 | ss-triton | `requirements.txt` | `faster-whisper==1.2.1`, `av==16.0.1`, `prometheus-client==0.21.1` |
 | ss-triton | `.github/workflows/ecr-push.yml` | main push → ECR `ss-triton:<SHA7>` → ss-k8s 태그 자동 갱신 |
-| ss-k8s | `apps/ss-triton/` | Deployment·Service·kustomization (이미지 태그는 CI가 갱신) |
+| ss-k8s | `apps/ss-triton/` | Deployment·Service·ScaledObject(`03_scaledobject.yaml`)·kustomization (이미지 태그는 CI가 갱신) |
+| ss-k8s | `platform/karpenter/nodepool-stt.yaml` | 전용 NodePool `stt`: t3.large, taint `sayscene.io/workload=stt:NoSchedule`, 최대 2대 |
+| ss-k8s | `platform/keda/` | KEDA Application·values ([KEDA 설치 매뉴얼](keda-install-v1.md)) |
 | ss-k8s | `apps/ss-be/01_configmap.yaml` | `STT_BASE_URL: http://ss-triton:8001`, `STT_TIMEOUT_SECONDS: 120` |
 | ss-k8s | `platform/kube-prometheus-stack/prometheus/values.yaml` | `additionalServiceMonitors`의 `ss-triton` 항목 |
 
@@ -45,10 +50,13 @@
 | 결정 | 근거 |
 |---|---|
 | Triton 대신 경량 Python 서버 | CPU에서는 Triton의 동적 배칭·GPU 공유 이점이 없고, 공식 이미지가 CUDA 기반으로 크다. 대기열·지표는 서버에 직접 넣었다 |
-| control plane에 배치 | STT는 요청 시 수 초만 CPU를 쓰는 패턴이라 burstable(t3)과 맞는다. 별도 노드 비용·기동 지연이 없다 |
-| CPU limit 2 (LLM과 달리 limit 설정) | etcd·apiserver·CoreDNS·Argo CD와 노드를 공유한다. 클러스터 안정성이 STT 지연보다 우선 |
-| 기본 모델 `small.en` | `large-v3-turbo`는 encoder가 large와 같아 CPU 2코어에서 회화용으로 느릴 것으로 추정. 환경변수로 바꿔 비교한다(§6) |
-| 동시 계산 1 + 대기열 10초 | CPU 2코어에서 동시 계산을 늘려도 처리량은 같고 지연만 늘어난다. 겹친 요청은 즉시 거절 대신 최대 10초 기다린다 |
+| ~~control plane에 배치~~ → **전용 NodePool `stt`(t3.large)** (2026-10-29) | STT는 처리 중 물리 코어를 꽉 쓴다. control plane에 두면 부하 시 etcd·apiserver와 코어를 다투고, 늘릴 자리도 없다. taint로 STT만 올리고 Karpenter가 노드를 늘리게 했다 |
+| 다른 Pod와 섞지 않음 (전용 노드 유지) | t3.large는 물리 1코어라 STT가 일할 때 남는 CPU가 거의 없다. 섞으면 STT·다른 Pod 모두 느려지고 Pod당 용량이 흔들려 KEDA 기준이 무너진다 |
+| CPU 1500m·메모리 2Gi, request = limit (Guaranteed) | t3.large allocatable 1700m에서 DaemonSet 몫을 뺀 값. 노드당 STT 1개라 더 낮출 이유가 없다. 메모리는 실측 피크 1.19GiB 기준 |
+| ~~c7i.large~~ 보류 | general AMI에서 Pod DNS가 실패했다. 주 NIC 이름 문제([이슈 01](../issue/20261027/01-llm-ami-ens5-primary-nic.md))와 같은 계열로 추정, 미확인. 일정상 t3.large로 확정 |
+| 기본 모델 `small.en` | `large-v3-turbo`는 encoder가 large와 같아 CPU에서 회화용으로 느릴 것으로 추정. 환경변수로 바꿔 비교한다(§6) |
+| 스레드 1 + 동시 계산 1 + 대기열 10초 | t3.large 실측(§5-4)에서 (2,1)·(1,1)·(1,2) 처리량이 같았다. 가장 단순한 (1,1)을 쓴다. 겹친 요청은 즉시 거절 대신 최대 10초 기다린다 |
+| KEDA로 1~2개 자동 확장 | 처리량은 노드 수에만 비례한다. 기준은 CPU가 아니라 서버 안의 요청 수(처리 + 대기)와 503 비율([KEDA 설치 매뉴얼 §6](keda-install-v1.md#6-ss-triton-연결-scaledobject)) |
 | 모델을 이미지에 굽지 않음 | 모델 비교를 쉽게 하려고. `small.en`은 수백 MB라 기동 시 다운로드를 감수 |
 | 이름 `ss-triton` 유지 | 미니 프로젝트라 레포·ECR·IAM 변경 없이 CI/CD를 그대로 쓰는 쪽을 택함 |
 
@@ -82,8 +90,8 @@
 | 변수 | 이미지 기본값 | 운영값 (Deployment) | 설명 |
 |---|---|---|---|
 | `WHISPER_MODEL` | `small.en` | `small.en` | 모델 이름. HF에서 받는다 |
-| `WHISPER_CPU_THREADS` | `2` | `2` | CPU limit과 맞춘다 |
-| `STT_CONCURRENCY` | `1` | `1` | 동시 계산 수. faster-whisper `num_workers`에도 같은 값 |
+| `WHISPER_CPU_THREADS` | `2` | `1` | 요청 1건의 계산 스레드 수. t3.large에서는 2로 올려도 빨라지지 않았다(§5-4) |
+| `STT_CONCURRENCY` | `1` | `1` | 동시 계산 수. faster-whisper `num_workers`에도 같은 값. 물리 코어 수보다 올려도 처리량이 늘지 않는다 |
 | `STT_QUEUE_TIMEOUT` | `10` | `10` | 슬롯 대기 상한(초) |
 | `STT_HOST` | `0.0.0.0` | — | 스크립트 직접 실행 시 기본값은 `127.0.0.1` |
 | `HF_HOME` | `/cache/huggingface` | — | emptyDir `/cache`에 모델 저장 |
@@ -131,9 +139,11 @@ ss-triton `main`에 push하면 `ecr-push` workflow가 실행된다.
 
 | 항목 | 값 |
 |---|---|
-| 배치 | `nodeSelector: node-role.kubernetes.io/control-plane: ""` + 해당 toleration |
+| 배치 | `nodeSelector: sayscene.io/workload: stt` + toleration `sayscene.io/workload=stt:NoSchedule` |
+| replicas | **Deployment에 두지 않는다.** KEDA(`03_scaledobject.yaml`)가 1~2로 정한다. 적으면 Sync마다 KEDA 값을 덮어쓴다 |
+| 배포 전략 | RollingUpdate `maxSurge: 1`, `maxUnavailable: 50%`. Pod 1개면 새 Pod를 2번째 노드에 먼저 띄워 끊김이 없고, 2개면 하나씩 내리고 띄운다(노드 최대 2대) |
 | 포트 | `http` 8001 (API·`/health`·`/metrics` 공용) |
-| resources | requests cpu 1 / memory 1Gi, limits cpu 2 / memory 3Gi (turbo 비교 고려) |
+| resources | requests = limits: cpu 1500m / memory 2Gi (Guaranteed). turbo 비교 시 메모리를 다시 잰다 |
 | 볼륨 | emptyDir `/cache` (sizeLimit 4Gi). Pod 재시작 시 모델 재다운로드 |
 | probe | startup `/health` 5초 × 60회(최대 5분), readiness 10초, liveness 10초·timeout 5초·6회 |
 
@@ -150,14 +160,15 @@ Application 정의는 Git에 없고 웹 콘솔에서 등록한다.
 
 ### 4-4. 기동
 
-1. Argo CD에서 `ss-triton` Application Sync.
-2. replicas를 1로 올린다. **Git의 `replicas`는 아직 `0`이다.** Argo CD UI에서만 올렸다면 다음 Sync 때 0으로 돌아가므로, 확인 후 Git도 1로 커밋한다.
+1. KEDA가 먼저 설치돼 있어야 한다([KEDA 설치 매뉴얼](keda-install-v1.md)). ScaledObject CRD가 없으면 Sync가 실패한다.
+2. Argo CD에서 `karpenter`(NodePool `stt`) → `ss-triton` 순서로 Sync. KEDA가 Pod를 1개로 맞추고, Karpenter가 stt 노드를 띄운다.
 3. 기동 확인:
    ```bash
-   kubectl -n sayscene get pod -l app=ss-triton
+   kubectl -n sayscene get pod -l app=ss-triton -o wide
+   kubectl -n sayscene get scaledobject,hpa
    kubectl -n sayscene logs deploy/ss-triton | head
    ```
-   `Whisper 준비 완료: http://0.0.0.0:8001 (threads=2, concurrency=1, queue_timeout=10.0s)`가 나오면 준비 완료.
+   `Whisper 준비 완료: http://0.0.0.0:8001 (threads=1, concurrency=1, queue_timeout=10.0s)`가 나오고, ScaledObject가 `READY True`면 준비 완료.
 
 ### 4-5. ss-be 연결
 
@@ -204,7 +215,23 @@ curl -s -X POST "https://<도메인>/api/v1/stt" -F "audio=@hello.wav;type=audio
 | 인식 결과 | "Hi, can I get an **ice-d** with **auto** milk, please?" (원문 iced latte / oat milk) |
 | 동시 4건, 대기 한도 3초 | 200 2건(1건은 1.65초 대기 후 처리), 503 2건. 지표 `ok 2`, `busy 2`와 일치 |
 
-Mac 수치는 참고용이다. control plane(t3, x86)에서는 더 느릴 수 있으므로 §3-4 지표로 실측한다.
+Mac 수치는 참고용이다. 실제 노드 실측은 §5-4.
+
+### 5-4. t3.large 단일 Pod 실측 (2026-10-29)
+
+전용 t3.large 노드에 Pod 1개(CPU 1500m Guaranteed, `small.en`)를 띄우고, control plane에서 `bench.py`로 Service ClusterIP에 부하를 줬다. 음성은 `say`로 만든 3.5·9.1·18.4초 영어 WAV 3개를 돌려 썼다. 칸당 2분, 약 20건.
+
+| threads, concurrency | 동시 요청 | 처리량 | p50 | p90 | 503 |
+|---|---|---|---|---|---|
+| 2, 1 | 1 / 2 / 4 | 0.165 / 0.163 / 0.161 rps | 5.94 / 12.29 / 13.96s | 7.20 / 13.20 / 15.42s | 0 / 0 / 20(+연결 끊김 2) |
+| **1, 1 (채택)** | 1 / 2 / 4 | 0.164 / 0.161 / 0.165 rps | 6.07 / 12.44 / 12.95s | 7.07 / 13.28 / 15.40s | 0 / 0 / 22 |
+| 1, 2 | 1 / 2 / 4 | 0.162 / 0.154 / 0.158 rps | 6.14 / 12.75 / 17.66s | 7.21 / 15.00 / 21.99s | 0 / 0 / 15(+연결 끊김 1) |
+
+- **처리량은 조합과 무관하게 약 0.16 rps(분당 약 10건)다.** t3.large의 vCPU 2개는 물리 1코어의 하이퍼스레드로 알고 있고, int8 행렬 연산은 두 번째 하이퍼스레드의 덕을 거의 못 본다(추정).
+- 동시 2건이면 p50이 두 배가 된다. Pod가 1건씩 차례로 처리한다는 뜻이다.
+- 처리 약 6초, `STT_QUEUE_TIMEOUT` 10초라 **대기 요청이 2건을 넘으면 503이 난다.**
+- "연결 끊김"(`URLError`)은 서버가 본문을 읽기 전에 503을 보내고 닫아서 생긴다. 사실상 503과 같다.
+- 메모리 피크(working set) **1.19GiB**. 사용자 1명이 잠깐 썼을 때 "처리 + 대기 요청 수"는 **0.175**.
 
 ---
 
@@ -222,9 +249,11 @@ Mac 수치는 참고용이다. control plane(t3, x86)에서는 더 느릴 수 �
 | 항목 | 내용 |
 |---|---|
 | CloudFront 30초 | CloudFront 오리진 응답 대기 기본값은 30초다. 대기(최대 10초) + 처리 시간이 30초를 넘으면 BE timeout(120초)보다 먼저 504가 난다. turbo 비교나 대기 한도 조정 시 이 합을 넘지 않게 한다 |
-| t3 CPU 크레딧 | control plane은 burstable이다. 크레딧이 줄면 STT 지연 측정값이 오염된다 |
-| 동시 사용자 | 처리량은 CPU 2코어에 묶인다. 대기열은 "끊기지 않고 기다리게"만 할 뿐 처리량을 늘리지 않는다 |
-| replicas | Git 값(`0`)과 실제 값이 다르면 Sync 시 0으로 돌아간다(§4-4) |
+| t3 CPU 크레딧 | stt 노드(t3.large)도 burstable이다. 2026-10-29 확인 시 **unlimited**라 성능은 유지되지만 기준 성능(vCPU당 30%)을 넘긴 만큼 추가 요금이 붙는다 |
+| 동시 사용자 | Pod 1개 처리량은 약 0.16 rps다. 대기열은 "끊기지 않고 기다리게"만 할 뿐 처리량을 늘리지 않는다. 늘리는 방법은 노드(Pod) 수뿐이다 |
+| replicas | Deployment에 `replicas`를 다시 넣지 않는다. Sync마다 KEDA가 정한 값을 덮어쓴다 |
+| 로그 수집 | Alloy(logs) DaemonSet에 `stt` taint toleration이 없어 **stt 노드의 ss-triton 로그가 Loki에 수집되지 않는다.** `kubectl logs`로 본다. 필요하면 Alloy values에 toleration을 추가한다 |
+| 노드 접속 | stt 노드는 Karpenter가 띄워 SSH 키가 없다. 노드 안은 `kubectl debug node/<노드> -it --image=busybox:1.36`으로 본다 |
 | 이름 혼동 | Pod·Service·이미지·Argo 앱은 `ss-triton`, 지표 이름은 `stt_*`다. 대시보드에 설명을 단다 |
 | ServiceMonitor 중복 | `apps/ss-be/07_servicemonitor.yaml`(팀원 추가)과 values의 `additionalServiceMonitors.ss-be`가 같은 대상을 본다. 중복 수집 여부 정리 필요 |
 
@@ -234,7 +263,9 @@ Mac 수치는 참고용이다. control plane(t3, x86)에서는 더 느릴 수 �
 
 - **실도메인에서 간헐적 STT 오류**(2026-10-28 확인, RESTARTS 0). 원인 미확인. 관측성 세팅 완료 후 `stt_requests_total{result}`, 대기·처리 시간, 브라우저의 실패 응답 코드(CloudFront 504 여부)로 재검토한다. 대기열이 원인이면 Redis 대기열 + SSE 비동기 구조를 검토한다.
 - `small.en` ↔ `large-v3-turbo` 실측 비교(§6).
-- Git `replicas` 1 반영 여부 확인.
+- KEDA 자동 확장 동작 테스트(1 → 2 → 1, 노드 추가·회수). 테스트 후 최대 Pod 수와 stt NodePool limits를 운영값으로 정한다.
+- c7i.large(7세대 Intel) Pod DNS 실패 원인 확인. general AMI의 networkd 주 NIC 매칭이 원인이면 AMI를 고쳐 다시 비교한다.
+- 모델을 이미지에 넣을지 검토. 지금은 Pod가 뜰 때마다 HF에서 받아 새 노드 기동이 느리고, 외부 네트워크 문제 시 Pod가 뜨지 못한다.
 
 ---
 
