@@ -445,7 +445,12 @@ avg_over_time(DCGM_FI_DEV_GPU_UTIL[5m])
 
 NVIDIA 공식 대시보드가 있다. Grafana → Dashboards → Import → **ID `12239`** 를 넣으면 된다. 데이터소스는 Prometheus 를 고른다.
 
-아직 가져오지 않았다.
+10-29 에 가져왔다. 태그는 `gpu` · `dcgm` 이다.
+
+> **전제 — Grafana 의 `persistence` 가 켜져 있어야 한다.**
+> 꺼져 있으면 `grafana.db` 가 `emptyDir` 위에 있어, Import 해도 파드가 다시
+> 만들어질 때 사라진다. 10-29 에 실제로 한 번 잃었다. 같은 날 `grafana-local`
+> PV 를 붙여 해소했다 (`kube-prometheus-stack-install-v1.md`).
 
 ---
 
@@ -486,7 +491,7 @@ kubectl -n monitoring delete daemonset,service,servicemonitor,configmap,servicea
 ## 11. 남은 것
 
 ```
-⬜  Grafana 대시보드 Import (ID 12239)
+✅  Grafana 대시보드 Import (ID 12239) — 10-29. 태그 gpu · dcgm
 ⬜  알림 규칙 — 며칠 데이터를 쌓은 뒤 기준을 정한다 (§9)
 ⬜  전력 지표 — WSL 에서 가능한지 추가 조사. 우선순위 낮음
 ⬜  vLLM 자체 메트릭 수집 — VRAM·큐 길이는 그쪽이 정확하다 (§7)
