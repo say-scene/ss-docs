@@ -1,6 +1,6 @@
 # KEDA 설치 매뉴얼
 
-> 상태: **설치 완료 (`Synced` + `Healthy`), ss-triton 자동 확장 테스트 전** · 작성일: 2026-10-29 · 실측일: 2026-10-29
+> 상태: **설치 완료 (`Synced` + `Healthy`), ss-triton 자동 확장 동작 확인 (1 → 2 → 1, 노드 회수까지)** · 작성일: 2026-10-29 · 실측일: 2026-10-29
 > 관련: [CPU Whisper STT 세팅 매뉴얼](stt-cpu-whisper-setup-v1.md) · [kube-prometheus-stack 설치 문서](../monitoring/kube-prometheus-stack-install-v1.md)
 > ss-k8s 파일: `platform/keda/application.yaml` · `platform/keda/values.yaml` · `apps/ss-triton/03_scaledobject.yaml`
 
@@ -227,6 +227,8 @@ kubectl describe scaledobject ss-triton -n sayscene   # READY False면 Events에
 ```
 
 부하 테스트는 control plane에서 `bench.py`(동시 요청 수 `-c`, 시간 `-d`)로 한다. `-c 2`로 5분 주면 2번째 Pod와 t3.large가 뜨고, 멈추고 약 5분 뒤 1개로 줄어야 한다.
+
+**결과 (2026-10-29)**: 정상 동작. 부하 시 Pod 2개·stt 노드 2대로 늘었고, 부하를 멈춘 뒤 Pod 1개로 줄고 빈 노드가 회수되는 것까지 확인했다.
 
 ---
 

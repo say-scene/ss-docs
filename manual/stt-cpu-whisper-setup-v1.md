@@ -263,7 +263,7 @@ Mac 수치는 참고용이다. 실제 노드 실측은 §5-4.
 
 - **실도메인에서 간헐적 STT 오류**(2026-10-28 확인, RESTARTS 0). 원인 미확인. 관측성 세팅 완료 후 `stt_requests_total{result}`, 대기·처리 시간, 브라우저의 실패 응답 코드(CloudFront 504 여부)로 재검토한다. 대기열이 원인이면 Redis 대기열 + SSE 비동기 구조를 검토한다.
 - `small.en` ↔ `large-v3-turbo` 실측 비교(§6).
-- KEDA 자동 확장 동작 테스트(1 → 2 → 1, 노드 추가·회수). 테스트 후 최대 Pod 수와 stt NodePool limits를 운영값으로 정한다.
+- 최대 Pod 수와 stt NodePool limits를 운영값으로 정한다. 지금은 테스트용 상한 2다. KEDA 자동 확장(1 → 2 → 1, 노드 추가·회수)은 2026-10-29 정상 동작을 확인했다.
 - c7i.large(7세대 Intel) Pod DNS 실패 원인 확인. general AMI의 networkd 주 NIC 매칭이 원인이면 AMI를 고쳐 다시 비교한다.
 - 모델을 이미지에 넣을지 검토. 지금은 Pod가 뜰 때마다 HF에서 받아 새 노드 기동이 느리고, 외부 네트워크 문제 시 Pod가 뜨지 못한다.
 
