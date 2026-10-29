@@ -1,6 +1,6 @@
 # kube-prometheus-stack 설치 문서
 
-> 담당 ① · 작성 2026-10-27 · 갱신 2026-10-29 (**Grafana 비밀번호·저장소·배포 전략** §12-8) · 2026-10-28 (배포 후 리뷰 · CNI 장애 · 사용법 · 알림 수신처 · 외부 노출 검토) · 상태: **설치 완료 (2026-10-27 20:25, `Healthy` + `Synced`)**
+> 담당 ① · 작성 2026-10-27 · 갱신 2026-10-29 (**Grafana 비밀번호·저장소** §12-8) · 2026-10-28 (배포 후 리뷰 · CNI 장애 · 사용법 · 알림 수신처 · 외부 노출 검토) · 상태: **설치 완료 (2026-10-27 20:25, `Healthy` + `Synced`)**
 > 클러스터 전반은 [al2023-cpu-cluster-karpenter-guide.md](../al2023-cpu-cluster-karpenter-guide.md)
 > 배경과 팀 분담 검토(`관측성-검토.md`)·클러스터 구성 정리(`클러스터구성.md`)는 ① 담당 로컬 문서로, 이 저장소에 없다.
 
@@ -325,7 +325,7 @@ grafana:
 
 **`sidecar.datasources` 는 반드시 켠다.** 이것이 켜져 있으면 ③ 담당이 Loki·Tempo 데이터소스를 **자기 폴더의 ConfigMap 으로** 붙일 수 있다. 꺼져 있으면 ③ 이 이 파일을 고쳐야 해서 담당 경계가 겹친다.
 
-**2026-10-29 에 세 가지를 더했다** (§12-8).
+**2026-10-29 에 두 가지를 더했다** (§12-8).
 
 ```yaml
   admin:
@@ -334,9 +334,9 @@ grafana:
     enabled: true                       # 대시보드가 파드 재생성에서 살아남는다
     storageClassName: local-prometheus
     size: 2Gi
-  deploymentStrategy:
-    type: Recreate                      # 두 파드가 같은 SQLite 를 열지 않게
 ```
+
+`deploymentStrategy: Recreate` 도 넣어봤으나 **쿠버네티스가 거부해서 뺐다** (§12-8 ③).
 
 `sidecar.dashboards` 도 함께 켰다. 데이터소스와 같은 구조라 ③ 이 자기 폴더의 ConfigMap 으로 대시보드를 붙일 수 있다.
 
@@ -1010,8 +1010,10 @@ ssh -i <키> -L 3000:localhost:3000 ec2-user@<기본 노드 EIP>
                                                         ↓
                                         PV 를 쓰면 롤링 중 두 파드가 같은 DB 를 연다
                                                         ↓
-                                                   Recreate
+                                                Recreate — 시도했으나 거부됨
 ```
+
+적용된 것은 **①②뿐이다.** ③ 은 되돌렸다.
 
 #### 발단 — 보류가 보류되지 않았다
 
@@ -1085,32 +1087,70 @@ kubectl delete pod -n monitoring -l app.kubernetes.io/name=grafana
 
 파드 UID 가 바뀌므로 `emptyDir` 였다면 반드시 사라진다. 대시보드와 태그가 남았다. **추정이 아니라 실측이다.**
 
-#### ③ 배포 전략 — `Recreate`
-
-```yaml
-# grafana/values.yaml
-  deploymentStrategy:
-    type: Recreate
-```
+#### ③ 배포 전략 — `Recreate` 는 **적용하지 못했다**
 
 차트 기본값 `RollingUpdate` 는 새 파드를 먼저 띄우고 옛 파드를 내린다. 그 사이 **두 파드가 같은 `grafana.db` 를 동시에 연다.**
 
 `ReadWriteOnce` 는 **"노드 하나" 라는 뜻이지 "파드 하나" 가 아니다.** 둘 다 기본 노드에 뜨므로 접근 모드가 막아주지 못한다. `grafana.db` 는 SQLite 다.
 
+그래서 `deploymentStrategy: type: Recreate` 를 넣었다 (`ss-k8s` `4bf47ff`). **Sync 가 거부됐다.**
+
 ```
-얻음   DB 를 항상 한 프로세스만 연다
-잃음   배포 중 수십 초 중단. 그동안에도 Prometheus 는 계속 수집한다
+Deployment.apps "kube-prometheus-stack-grafana" is invalid:
+spec.strategy.rollingUpdate: Forbidden:
+may not be specified when strategy `type` is 'Recreate'
 ```
 
-**실제로 깨진 사례를 확인한 것은 아니다.** 동시 쓰기 창을 열어둘 이유가 없고 닫는 비용이 3 줄이라 닫았다.
+살아 있는 Deployment 에 `strategy.rollingUpdate` 가 **이미 들어 있기 때문이다.** `type` 만 바꾸면 두 필드가 공존하게 되고 쿠버네티스가 받지 않는다.
+
+```yaml
+# 거부 당시 살아 있던 객체
+strategy:
+  type: RollingUpdate
+  rollingUpdate: { maxSurge: 25%, maxUnavailable: 25% }
+```
+
+넣으려면 그 필드를 먼저 지워야 한다.
+
+```bash
+kubectl patch deploy -n monitoring kube-prometheus-stack-grafana \
+  --type=json -p='[{"op":"remove","path":"/spec/strategy/rollingUpdate"}]'
+```
+
+**되돌렸다** (`943c04a`). 손으로 한 번 더 만지는 값어치가 없다고 판단했다. `Recreate` 는 저장소 문제의 해결이 아니라 그 위에 얹는 보강이었고, **저장소 자체는 ② 로 이미 해결됐다.** 거부당해 적용된 적이 없으므로 클러스터는 계속 `RollingUpdate` 다.
+
+**남는 창** — 롤링 중 두 파드가 같은 `grafana.db` 를 수 초간 동시에 연다. 실제로 깨진 사례를 확인한 적은 없고, Grafana values 를 고칠 때만 열린다.
+
+#### ④ 예상 못 한 부작용 — 옛 Secret 이 남는다
+
+`admin.existingSecret` 을 넣는 순간 **차트는 자기 Secret 을 더는 렌더링하지 않는다.** 그런데 `Prune` 이 꺼져 있어 클러스터에는 남는다.
+
+```
+Secret/kube-prometheus-stack-grafana   OutOfSync
+```
+
+깃에 없는데 클러스터에 있으니 **영구 `OutOfSync`** 다. §13-1 의 `ServiceMonitor ss-be` 와 같은 패턴이다.
+
+쓰이지 않는 옛 admin 비밀번호가 들어 있다. 참조가 없는 것을 확인하고 지운다.
+
+```bash
+# 6 곳 전부 grafana-admin 을 가리키는지 먼저 본다
+kubectl get deploy -n monitoring kube-prometheus-stack-grafana \
+  -o jsonpath='{range .spec.template.spec.containers[*].env[*]}{.name}{" <- "}{.valueFrom.secretKeyRef.name}{"\n"}{end}'
+
+kubectl delete secret -n monitoring kube-prometheus-stack-grafana
+```
+
+사이드카 둘도 `REQ_USERNAME` · `REQ_PASSWORD` 로 **같은 Secret 을 쓴다.** Grafana API 를 호출해 설정을 다시 읽히는 용도다. 전환이 빠짐없이 됐는지는 이 여섯 줄로 확인한다.
 
 #### 대가 — 수동 전제가 둘 늘었다
 
 §12-6 이 보류한 이유 그대로다. 피한 것이 아니라 **받아들였다.**
 
 ```
-/var/lib/grafana 디렉터리    §16 1 번에 합침
-grafana-admin Secret         §16 3 번
+/var/lib/grafana 디렉터리         §16 1 번에 합침
+grafana-admin Secret              §16 3 번
+옛 Secret 을 한 번 지워야 한다     §16 5 번
 ```
 
 §16-1 의 Sealed Secrets · External Secrets 설계가 그만큼 더 필요해졌다.
@@ -2382,6 +2422,7 @@ Secret 으로 분리해 두어서 **클러스터에서 한 줄로 끝난다.** �
 | 2 | `alertmanager-discord` Secret | Alertmanager 파드가 안 뜸 | §15-8 A |
 | 3 | `grafana-admin` Secret | Grafana 파드가 안 뜸 | §12-8 |
 | 4 | 손으로 넣은 대시보드 | 그 대시보드만 없음 | §15-2 |
+| 5 | 옛 Grafana Secret 삭제 | 영구 `OutOfSync` | §12-8 ④ |
 
 ```bash
 # 1
@@ -2406,7 +2447,13 @@ EOF
 unset PW
 ```
 
-**1 · 2 · 3 은 설치 전에 해야 한다.** 없으면 파드가 뜨지 않는다. 4 는 설치 후에 한다.
+```bash
+# 5  admin.existingSecret 을 쓰면 차트가 자기 Secret 을 더는 만들지 않는다.
+#    Prune 이 꺼져 있어 옛 것이 남고 OutOfSync 가 된다. 한 번만 지운다.
+kubectl delete secret -n monitoring kube-prometheus-stack-grafana
+```
+
+**1 · 2 · 3 은 설치 전에 해야 한다.** 없으면 파드가 뜨지 않는다. 4 · 5 는 설치 후에 한다.
 
 `grafana cli admin reset-admin-password` 는 쓰지 않는다. `grafana.db` 만 고치고 Secret 은 그대로 두어 **파드가 다시 뜨면 되돌아간다** (§12-8).
 
