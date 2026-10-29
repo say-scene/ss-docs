@@ -148,6 +148,65 @@ ss-k8s `apps/ss-triton/03_scaledobject.yaml`.
 - 쿼리 결과가 비면 KEDA는 0으로 본다(`ignoreNullValues` 기본값 `true`). 503 비율 쿼리는 0÷0(NaN)을 피하려고 분모에 `> 0`을 붙였다.
 - Deployment에는 `replicas`를 두지 않는다. 적으면 Argo CD sync마다 KEDA가 정한 값을 덮어쓴다.
 
+### 언제 늘고 줄어드나
+
+`threshold: "0.8"`은 "쿼리 값이 0.8 이상이면 늘린다"가 아니라 **Pod 1개가 감당할 목표 값**이다. 실제 동작에는 세 가지 조건이 붙는다.
+
+1. **전체 값 ÷ 0.8**: `필요한 Pod 수 = 올림(쿼리 값 ÷ 0.8)`. 쿼리 값은 모든 Pod의 합계다.
+2. **HPA 허용 오차 10%**: 쿠버네티스 HPA는 계산 결과가 현재와 10% 넘게 차이 날 때만 Pod 수를 바꾼다(기본 tolerance 0.1). 경계 근처에서 늘었다 줄었다 하는 것을 막는다.
+3. **최근 2분 평균**: 쿼리가 `rate(...[2m])`라 순간 값이 아니다. KEDA는 30초마다 확인한다.
+
+| 현재 Pod | 쿼리 값 | 계산 | 결과 |
+|---|---|---|---|
+| 1개 | 0.85 | 0.85 ÷ 0.8 = 1.06배, 10% 이내 | 그대로 1개 |
+| 1개 | 0.9 | 0.9 ÷ 0.8 = 1.125배, 10% 초과 | **2개로 늘림** |
+| 2개 | 1.2 | 올림(1.2 ÷ 0.8) = 2 | 그대로 2개 |
+| 2개 | 0.7 | 올림(0.7 ÷ 0.8) = 1 | 300초 동안 유지되면 **1개로 줄임** |
+
+- **늘어나는 시점**: Pod 1개일 때 쿼리 값이 약 **0.88**을 넘으면(0.8 × 1.1).
+- **줄어드는 시점**: Pod 2개일 때 쿼리 값이 **0.8 이하**로 300초 동안 유지되면.
+- 503 비율 trigger도 같은 허용 오차가 붙어 약 **5.5%**부터 늘린다.
+- 실제로 0.8부터 늘리고 싶으면 threshold를 약 0.73으로 낮춘다(0.73 × 1.1 ≈ 0.8).
+- 테스트 중에는 `kubectl get hpa -n sayscene -w`의 TARGETS 칸(`현재값/목표값`, 예: `880m/800m`)을 본다.
+
+### Grafana 확인용 PromQL
+
+Explore → 데이터소스 Prometheus → Code 모드에 붙여 넣는다. 요청이 없으면 결과가 비므로 Grafana용은 `or vector(0)`을 붙여 0으로 보이게 했다. ScaledObject 쿼리에는 붙이지 않는다(KEDA가 빈 결과를 0으로 본다).
+
+**① 처리 중 + 대기 중 요청 수 (주 기준, threshold 0.8)**: 최근 2분 동안 평균 몇 건이 서버 안에 있었나. 1.0이면 Pod 1개가 꽉 찬 상태.
+
+```promql
+(
+  sum(rate(stt_inference_seconds_sum{namespace="sayscene"}[2m]))
+  +
+  sum(rate(stt_queue_wait_seconds_sum{namespace="sayscene"}[2m]))
+) or vector(0)
+```
+
+- 원리: 초당 쌓인 처리 시간과 대기 시간의 합은 그 시간 동안 서버 안에 있던 요청 수의 평균과 같다(리틀의 법칙).
+- 벤치마크 기준으로 동시 요청 1이면 약 1.0, 2면 약 2.0이 나온다.
+
+**② 503(`STT_BUSY`) 비율 (보조 기준, threshold 0.05)**: 요청 중 몇 %를 거절했나.
+
+```promql
+(
+  sum(rate(stt_requests_total{namespace="sayscene", result="busy"}[2m]))
+  /
+  (sum(rate(stt_requests_total{namespace="sayscene"}[2m])) > 0)
+) or vector(0)
+```
+
+- 분모의 `> 0`은 요청이 없을 때 0÷0(NaN)을 막는다. NaN은 값으로 취급돼 `or vector(0)`이 대신하지 못한다.
+- Pod가 시작된 뒤 503이 한 번도 없으면 `result="busy"` 시계열이 아직 없어서 결과가 빈다. 정상이다.
+
+**③ 대기 시간 p90 (참고)**: 처리 순서를 얼마나 기다렸나.
+
+```promql
+histogram_quantile(0.9, sum by (le) (rate(stt_queue_wait_seconds_bucket{namespace="sayscene"}[2m]))) or vector(0)
+```
+
+- 처리 순서를 받은 요청만 기록한다. 10초를 기다리다 503이 된 요청은 빠지므로, 503이 나기 시작하면 실제보다 낮게 보인다. ②와 함께 본다.
+
 ### 단일 Pod 기준값 (t3.large, `small.en`, 2026-10-29 실측)
 
 | `WHISPER_CPU_THREADS`, `STT_CONCURRENCY` | 처리량 | 동시 1건 p50 | 동시 4건 p90 |
