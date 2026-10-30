@@ -1,6 +1,6 @@
 # CPU Whisper STT 세팅 매뉴얼
 
-> 상태: **운영 중 (실도메인 연동 확인, 간헐 오류 원인 미확인)** · 작성일: 2026-10-28 · 갱신 2026-10-29 (전용 노드 이전 · 스레드 조합 실측 · KEDA 자동 확장)
+> 상태: **운영 중 (실도메인 연동 확인, 간헐 오류 원인 미확인)** · 작성일: 2026-10-28 · 갱신 2026-10-30 (전용 노드 이전 · 스레드 조합 실측 · KEDA 자동 확장 · 확장 소요 시간 실측)
 > 관련: [2026-10-27 이슈 기록](../issue/20261027/README.md) · [KEDA 설치 매뉴얼](keda-install-v1.md) · ss-triton tag `triton-gpu-v1`(교체 전 GPU Triton 원본)
 
 ---
@@ -57,7 +57,7 @@
 | 기본 모델 `small.en` | `large-v3-turbo`는 encoder가 large와 같아 CPU에서 회화용으로 느릴 것으로 추정. 환경변수로 바꿔 비교한다(§6) |
 | 스레드 1 + 동시 계산 1 + 대기열 10초 | t3.large 실측(§5-4)에서 (2,1)·(1,1)·(1,2) 처리량이 같았다. 가장 단순한 (1,1)을 쓴다. 겹친 요청은 즉시 거절 대신 최대 10초 기다린다 |
 | KEDA로 1~2개 자동 확장 | 처리량은 노드 수에만 비례한다. 기준은 CPU가 아니라 서버 안의 요청 수(처리 + 대기)와 503 비율([KEDA 설치 매뉴얼 §6](keda-install-v1.md#6-ss-triton-연결-scaledobject)) |
-| 모델을 이미지에 굽지 않음 | 모델 비교를 쉽게 하려고. `small.en`은 수백 MB라 기동 시 다운로드를 감수 |
+| 모델을 이미지·S3에 넣지 않음 | 처음에는 모델 비교를 쉽게 하려는 이유였다. 2026-10-30 실측으로 속도 면에서도 이득이 없음을 확인했다. 모델 준비(다운로드 + 로드)가 6.4초로 확장 시간(약 1분 45초)의 6% 정도이고, 이미지에 넣으면 pull이 오히려 늘어날 가능성이 높다(§5-5) |
 | 이름 `ss-triton` 유지 | 미니 프로젝트라 레포·ECR·IAM 변경 없이 CI/CD를 그대로 쓰는 쪽을 택함 |
 
 ---
@@ -233,6 +233,92 @@ Mac 수치는 참고용이다. 실제 노드 실측은 §5-4.
 - "연결 끊김"(`URLError`)은 서버가 본문을 읽기 전에 503을 보내고 닫아서 생긴다. 사실상 503과 같다.
 - 메모리 피크(working set) **1.19GiB**. 사용자 1명이 잠깐 썼을 때 "처리 + 대기 요청 수"는 **0.175**.
 
+### 5-5. 신규 노드 확장 소요 시간 실측 (2026-10-30)
+
+KEDA가 Pod를 늘리기로 결정한 뒤 새 stt 노드(t3.large)에서 STT가 트래픽을 받기까지 걸린 시간이다. 확장 2회를 측정했다.
+
+#### 결과
+
+| 구간 | 노드 A (`ip-10-0-5-13`) | 노드 B (`ip-10-0-14-247`) | 하는 일 | 근거 |
+|---|---|---|---|---|
+| ① Pod 생성 → EC2 생성 요청 | 3초 | 3초 | Karpenter가 노드가 필요하다고 판단하고 EC2 요청 | Pod `Created` → NodeClaim `Launched` |
+| ② EC2 부팅 + 클러스터 조인 | **42초** | **30초** | 인스턴스 부팅, userData의 `kubeadm join` | NodeClaim `Launched` → `Registered` |
+| ③ 노드 준비 | **29초** | **30초** | kubelet, aws-node(VPC CNI), kube-proxy 준비 | NodeClaim `Registered` → `Initialized` |
+| ④ Pod 네트워크 준비 (추정) | 약 18초 | 약 19초 | aws-node가 새 노드에서 Pod용 ENI·IP 할당 | ⑤의 배정 → 컨테이너 시작(26초 / 29초)에서 이미지 pull을 뺀 값 |
+| ⑤ 이미지 pull | 8.4초 | 10.2초 | ECR에서 194MB pull | kubelet `Pulled` 이벤트 |
+| ⑥ 모델 다운로드 + 로드 | 6.4초 | 약 6초 | HF Hub에서 `small.en` 받고 메모리에 로드 | 로그 `Whisper 모델 준비 중` → `Whisper 준비 완료` |
+| ⑦ readiness 확인 | 3초 | 약 4초 | `/health` probe(10초 주기) 통과 대기 | 모델 준비 완료 → Pod `Ready` |
+| **합계** | **1분 47초** | **1분 42초** | | Pod `Created` → Pod `Ready` |
+
+```
+② EC2 부팅·조인   ██████████████████████  30~42초
+③ 노드 준비       ███████████████         약 30초
+④ Pod 네트워크    █████████               약 18초
+⑤ 이미지 pull     █████                   8~10초
+⑥ 모델            ███                     약 6초
+⑦ readiness       ██                      3~4초
+```
+
+- **노드 쪽(②~④)이 약 1분 20초로 전체의 75% 이상**을 차지한다.
+- 이미지와 모델(⑤+⑥)은 합쳐도 15초 남짓이다.
+- ④는 직접 측정한 값이 아니라 뺄셈으로 구한 추정이다. 이 클러스터는 Pod IP 대역이 노드와 달라서(VPC CNI custom networking), 새 노드에서 Pod용 ENI를 붙이는 시간이 포함된 것으로 본다.
+
+#### 표에 없는 시간: 부하 시작 → 확장 결정
+
+- 위 측정은 HPA가 Pod를 늘리기로 결정한 순간부터다. 그 전에 KEDA가 부하를 감지하는 시간이 따로 있다.
+- 주 기준 쿼리가 최근 2분 평균(`rate[2m]`)이고, KEDA는 30초마다 확인하며, HPA는 목표의 10%를 넘어야 움직인다([KEDA 설치 매뉴얼 §6](keda-install-v1.md#6-ss-triton-연결-scaledobject)). 그래서 **부하 시작 → 결정에 1~2분**이 더 걸릴 수 있다(미측정).
+- 따라서 사용자 입장에서는 **부하 시작부터 2번째 Pod가 요청을 받기까지 약 3분**으로 본다. 그동안 늘어난 요청은 기존 Pod의 대기열(최대 10초)과 503으로 처리된다.
+
+#### 결론: 모델을 S3나 이미지에 넣어도 빨라지지 않는다
+
+모델 다운로드를 줄이는 방법을 검토했고, **지금 구조(기동 시 HF Hub에서 다운로드)를 유지**하기로 했다.
+
+| 방식 | 모델 준비 | 이미지 pull | 결과 | 추가 비용 |
+|---|---|---|---|---|
+| **현재: 기동 시 HF 다운로드** | 6.4초 | 8~10초 | 기준 | 없음 |
+| 이미지에 모델 포함 | 0초 (로드 시간은 남음) | 486MB 증가. 현재 이미지의 실효 속도(약 19~23MB/s)로 단순 환산하면 약 21~25초 증가 | **줄일 수 있는 것은 최대 몇 초, 늘어나는 pull 시간이 더 클 가능성이 높음** | 모델을 바꿀 때마다 이미지 재빌드 |
+| S3에 캐시 (없으면 업로드, 있으면 다운로드) | 다운로드 시간만 대체. 현재 HF 다운로드가 이미 빨라 몇 초 단축이 최대 | 변화 없음 | **거의 차이 없음** | 캐시 로직과 boto3 추가, Pod에 S3 **쓰기** 권한 필요, Pod 2개가 동시에 뜰 때 업로드 경합 |
+
+판단 근거로 쓴 숫자와 그 출처:
+
+| 숫자 | 값 | 출처 |
+|---|---|---|
+| `small.en` 모델 크기 | 486MB (`model.bin` 483,545,366 bytes + tokenizer 등) | HF Hub API `Systran/faster-whisper-small.en` 파일 목록(2026-10-30 조회) |
+| 현재 ss-triton 이미지 pull | 194,433,815 bytes를 8.444초 / 10.196초 → **실효 23.0 / 19.1MB/s** | 노드 A·B의 kubelet `Pulled` 이벤트(실측) |
+| HF 다운로드 + 로드 | 6.4초 → 다운로드만으로도 **실효 76MB/s 이상** | Pod 로그 타임스탬프(실측). 새 노드라 emptyDir `/cache`가 비어 있어 실제로 다운로드했다 |
+
+- **핵심 근거는 "모델 준비가 이미 6.4초"라는 실측이다.** 이미지에 넣든 S3로 옮기든 줄일 수 있는 것은 이 6.4초 중 다운로드 몫(로드 시간 제외)뿐이다.
+- ECR 실효 속도는 네트워크 속도가 아니다. 다운로드, 압축 해제, 레이어 풀기, 인증을 합친 값이다. 레이어가 커지면 고정 비용이 묻혀 MB당 시간이 줄 수 있으므로, "약 21~25초 증가"는 **현재 이미지 기준의 단순 환산이며 실측이 아니다.** 다만 실제 증가가 이보다 작더라도, 줄일 수 있는 최대치가 몇 초라서 결론은 바뀌지 않는다.
+- S3 방식도 S3 주소를 찾으려면 DNS가 필요하다. c7i.large에서 겪은 DNS 실패(§2) 같은 네트워크 문제는 S3로 막을 수 없다.
+- HF 로그인 없이 받고 있어 `unauthenticated requests to the HF Hub` 경고가 나온다. 속도 문제가 아니라 요청 횟수 제한이 더 빡빡하다는 뜻이다. Pod 1~2개 규모에서는 문제없고, 확장이 잦아지면 `HF_TOKEN`을 Secret으로 넣는다.
+
+#### 확장 시간을 줄이려면 (효과 큰 순)
+
+| 방법 | 줄어드는 구간 | 예상 효과 | 비용 |
+|---|---|---|---|
+| 감지를 빠르게: 쿼리 `rate[2m]` → `[1m]`, 또는 threshold를 0.8보다 낮춤 | 부하 시작 → 결정 | 수십 초~1분 (추정) | 매니페스트 한 줄. 값이 더 출렁여 늘었다 줄었다 할 수 있음 |
+| 몰리는 시간대에 미리 2개 유지 (KEDA `cron` trigger) | 전체 | 그 시간대는 대기 0 | 그 시간대 노드 비용 |
+| 노드 준비 단축: AMI에 aws-node·kube-proxy 이미지 미리 포함, VPC CNI warm ENI/IP 설정 | ③·④ | 수십 초 (추정) | AMI 재빌드와 검증 |
+| 이미지·모델 최적화 | ⑤·⑥ | 거의 없음 | 위 결론 참고 |
+
+#### 측정 방법 (재측정용)
+
+새 노드로 확장된 직후, 노드가 회수되기 전에 control plane에서 실행한다. NodeClaim은 노드가 회수되면 함께 지워진다.
+
+```bash
+# 노드 단계별 시각 (Created → Launched → Registered → Initialized)
+kubectl get nodeclaims -l karpenter.sh/nodepool=stt -o jsonpath='{range .items[*]}{.status.nodeName}{"\n"}  Created     {.metadata.creationTimestamp}{"\n"}{range .status.conditions[*]}  {.type}{"\t"}{.lastTransitionTime}{"\n"}{end}{"\n"}{end}'
+
+# Pod 단계별 시각 (Created → PodScheduled → Ready)
+kubectl get pods -n sayscene -l app=ss-triton -o jsonpath='{range .items[*]}{.metadata.name} {.spec.nodeName}{"\n"}  Created     {.metadata.creationTimestamp}{"\n"}{range .status.conditions[*]}  {.type}{"\t"}{.lastTransitionTime}{"\n"}{end}{"\n"}{end}'
+
+# 이미지 pull 시간
+kubectl describe pod -n sayscene -l app=ss-triton | grep -e Pulled -e Scheduled -e Started
+
+# 모델 다운로드 + 로드 시간 (Pod 이름을 직접 넣는다)
+kubectl logs -n sayscene <pod> --timestamps | head -3
+```
+
 ---
 
 ## 6. 모델 비교 절차 (`small.en` ↔ `large-v3-turbo`)
@@ -265,7 +351,8 @@ Mac 수치는 참고용이다. 실제 노드 실측은 §5-4.
 - `small.en` ↔ `large-v3-turbo` 실측 비교(§6).
 - 최대 Pod 수와 stt NodePool limits를 운영값으로 정한다. 지금은 테스트용 상한 2다. KEDA 자동 확장(1 → 2 → 1, 노드 추가·회수)은 2026-10-29 정상 동작을 확인했다.
 - c7i.large(7세대 Intel) Pod DNS 실패 원인 확인. general AMI의 networkd 주 NIC 매칭이 원인이면 AMI를 고쳐 다시 비교한다.
-- 모델을 이미지에 넣을지 검토. 지금은 Pod가 뜰 때마다 HF에서 받아 새 노드 기동이 느리고, 외부 네트워크 문제 시 Pod가 뜨지 못한다.
+- 확장 시간 단축 검토. 결정 후 서비스까지 약 1분 45초이고 대부분이 노드 기동이다(§5-5). 먼저 감지 속도(`rate[2m]`, threshold)부터 조정한다. 모델을 이미지·S3에 넣는 방안은 효과가 없어 하지 않기로 했다(§5-5).
+- 부하 시작 → 확장 결정까지의 시간 실측(현재 1~2분으로 추정).
 
 ---
 
