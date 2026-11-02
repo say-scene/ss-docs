@@ -1,6 +1,6 @@
 # 사용자 동작 tracing 변경 요약
 
-> 2026-11-02 · 로컬 구현·검증 완료 / 운영 미배포 · 요구사항: [PRD §6.8](english-speaking-prd-architecture-v1.md#68-관측성)
+> 2026-11-02 · 초기 로컬 구현·검증 기록 / 운영 반영·검증은 별도 확인 · 요구사항: [PRD §6.8](english-speaking-prd-architecture-v1.md#68-관측성)
 
 ## 무엇을 바꿨나
 
@@ -22,7 +22,7 @@ speech.turn (FE 부모 span, 같은 trace ID)
 |---|---|
 | `ss_fe/src/telemetry.ts`, `main.tsx` | SDK 초기화, 동작 부모 span, API별 CLIENT span, W3C `traceparent` 전달. 전역 fetch 패치 없이 context를 명시적으로 전달 |
 | `useRecorder.ts` → `ChatRoom.tsx` → `useConversation.ts` / `conversation.ts` | 같은 동작 context를 STT 콜백과 후속 대화·자동 재시도로 전달. 마이크/UI는 먼저 해제하고 부모 span만 후속 응답까지 유지 |
-| FE의 번역·추천·조회·리포트·데모 호출부 | 알려진 API를 공통 wrapper로 계측. 별도 동작은 별도 trace이며 업무 payload와 재시도 `requestId`는 유지 |
+| FE의 번역·추천·조회·리포트 호출부 | 알려진 API를 공통 wrapper로 계측. 별도 동작은 별도 trace이며 업무 payload와 재시도 `requestId`는 유지 |
 | `ss_be/src/main/java/com/sayscene/BrowserTelemetryController.java` | `POST /api/telemetry/traces`의 OTLP/JSON을 검증·정제해 고정된 Alloy 주소로 전달 |
 | `ss_be` 설정, `ss_k8s/apps/ss-be/01_configmap.yaml` | `BROWSER_TELEMETRY_OTLP_ENDPOINT`로 비공개 수집 경로 설정. Collector 공개·CORS 확대 없음 |
 
@@ -40,7 +40,9 @@ BE에 다음 환경변수를 설정한다. 브라우저는 same-origin `/api/tel
 BROWSER_TELEMETRY_OTLP_ENDPOINT=http://alloy-otlp.monitoring.svc.cluster.local:4318/v1/traces
 ```
 
-주소가 비어 있으면 relay는 비활성화(`204`), 비어 있지 않은 잘못된 주소는 `503`과 고정 경고로 처리한다. FE·BE·ConfigMap 변경을 함께 반영해야 하며, **이번 작업에서 운영 배포는 하지 않았다.**
+주소가 비어 있으면 relay는 비활성화(`204`), 비어 있지 않은 잘못된 주소는 `503`과 고정 경고로 처리한다. FE·BE·ConfigMap 변경을 함께 반영해야 한다.
+
+FE main merge는 GitHub Actions의 자동 배포를 실행하지만, BE의 Argo CD Application `sayscene`은 현재 수동 sync 방식(`targetRevision: HEAD`)이다. Git merge·이미지 태그 갱신만으로 BE 파드가 반영되지는 않는다. `envFrom` ConfigMap 변경도 기존 파드를 자동 재시작하지 않으므로, 실제 반영 시 **수집 주소 ConfigMap 적용 → 새 BE 이미지/파드 rollout → FE 연결 확인**을 함께 검증한다. 클러스터 sync는 별도 승인 대상이며 이 문서는 운영 수집 성공을 증명하지 않는다.
 
 Tempo에서 발화를 찾고, 해당 FE span의 `session.id`로 같은 페이지의 다른 API 흐름을 조회한다.
 

@@ -2,7 +2,7 @@
 
 > 버전 v1 · 2026-10-21 · 상태: §9 후속 논의 확정 사항 통합 / 초기 전체 이력 전송 / 모델 한도 처리 추후 결정
 > 목적: 제품 경험·AI 서빙·인프라 운영을 입증하는 포트폴리오/PoC. 진행 중 대화·리포트·단어장은 브라우저에 저장하고, Redis는 진행 중 대화의 서버 측 임시 상태로 쓴다. 로그인·영구 서버 저장·SLO·HA는 제외한다.
-> 관측성 갱신: 2026-11-02 · FE 사용자 동작별 tracing 로컬 구현·검증 반영. 운영 배포는 별도이며, 변경 설명은 [사용자 동작 tracing](user-action-tracing.md)을 참고한다.
+> 관측성 갱신: 2026-11-02 · FE 사용자 동작별 tracing 로컬 구현·검증 반영. 운영 반영·검증은 별도이며, 변경 설명은 [사용자 동작 tracing](user-action-tracing.md)을 참고한다.
 
 ---
 
@@ -26,7 +26,7 @@
 | 탭·마이크 | 같은 브라우저 로컬 세션의 대화 상태 동기화, 입력 가능한 탭은 하나 | 마이크 사용권을 현재 탭으로 이전 가능 |
 | LLM 문맥 | 초기 구현은 설정 프롬프트와 Redis의 전체 유효 대화 이력을 매 요청 전송 | 요약·모델 한도 처리의 구체 정책과 구현은 추후 결정 |
 | 기존 PoC 인프라 | CloudFront/S3/ALB, kubeadm, Triton, Karpenter/KEDA, 관측성 | Redis 단일 파드 추가; 용량·복원·장애 처리 검증 필요 |
-| 요청 추적 | FE 사용자 동작별 trace + 페이지 단위 익명 `session.id`로 여러 API 흐름 조회 | STT→대화 응답 연결; 추론 서버 내부는 메트릭만 관측. 로컬 구현·검증 완료, 운영 미배포 |
+| 요청 추적 | FE 사용자 동작별 trace + 페이지 단위 익명 `session.id`로 여러 API 흐름 조회 | STT→대화 응답 연결; 추론 서버 내부는 메트릭만 관측. 로컬 구현·검증 완료; FE 배포와 BE Argo CD sync 상태는 별도 확인 |
 
 ---
 
@@ -374,14 +374,15 @@ python3 openai_frontend/main.py \
 
 ### 6.8 관측성
 
-- **구현 상태(2026-11-02)**: FE 사용자 동작별 tracing과 BE 수집 relay는 로컬 구현·검증 완료이며 운영에는 미배포다. 구현 방식·조회 예시·검증 결과는 [사용자 동작 tracing](user-action-tracing.md)에 정리한다.
+- **구현 상태(2026-11-02)**: FE 사용자 동작별 tracing과 BE 수집 relay의 초기 로컬 구현·검증을 완료했다. 이 기록만으로 운영 반영·검증 완료를 의미하지 않는다. 구현 방식·조회 예시·검증 결과는 [사용자 동작 tracing](user-action-tracing.md)에 정리한다.
 - **Trace 경계**: FE(`service.name=ss-fe`)가 동작별 부모 span을 만들고 API 요청마다 별도 CLIENT span의 `traceparent`를 전달한다. BE(`ss-be`)의 OTel Java agent가 SERVER → Redis/추론 HTTP CLIENT span을 같은 trace로 연결한다. 추론 서버 자체의 SERVER·내부 단계 span은 이번 변경에 추가하지 않으며, 내부 병목은 메트릭으로 확인한다.
 - **연결 단위**: `speech.turn`은 녹음 종료 후 STT 요청 → 대화 응답 처리를 한 trace로 묶는다. 번역·추천·조회 등 독립 동작은 별도 trace다. 자동 충돌 확인·재시도는 같은 동작 context를 유지하고, 나중의 수동 재시도는 새 trace를 사용한다. 시작/이어하기의 초기 동기화와 이후 첫 인사 생성, 종료와 리포트 생성은 각각 별도 동작이다.
 - **익명 흐름 조회**: FE span의 `session.id`는 페이지 메모리의 임의 UUID다. 동일 페이지의 여러 trace를 연결하되 새로고침·새 페이지에서는 회전한다. 실제 대화 `sessionId`, 업무 `requestId`, 로그인 사용자 식별자와 무관하며 브라우저 저장소에 보관하지 않는다. 이 속성은 FE span에만 있으므로 FE를 조건으로 trace를 찾은 뒤 연결된 BE span을 확인한다.
 - **수집 경로**: 브라우저 OTLP/JSON → same-origin `/api/telemetry/traces` → BE relay → Alloy(OTLP) → Tempo. `BROWSER_TELEMETRY_OTLP_ENDPOINT`는 서버의 고정 수집 주소다. 비어 있으면 relay 비활성화(`204`), 비어 있지 않은 잘못된 주소는 안전한 `503`으로 처리한다. Collector를 인터넷에 공개하거나 CORS를 확대하지 않는다.
+- **배포 경계**: FE는 main merge 후 GitHub Actions에서 자동 배포한다. BE의 Argo CD Application `sayscene`은 현재 수동 sync 방식이며 Git 기준 revision은 `HEAD`다. Git merge와 CI의 이미지 태그 갱신만으로 BE 파드 반영을 보장하지 않는다. relay 주소는 ConfigMap의 `envFrom`으로 주입하므로 실제 반영 시 ConfigMap 적용과 새 BE 파드 rollout을 함께 확인한다. 클러스터 sync는 별도 승인 범위다.
 - **안전 경계**: FE는 알려진 same-origin API만 계측하고 발화·오디오·body·URL query·쿠키·인증 헤더·실제 대화 식별자·예외 원문을 기록하지 않는다. relay는 허용 필드만 재구성하고 크기·span 수·인스턴스별 요청량/동시 처리량을 제한한다. 계측 초기화·export 실패는 업무 요청을 막지 않으며 수집은 best effort다. 마이크/UI는 후속 대화 생성 완료를 기다리지 않고 기존대로 해제한다.
 - **메트릭**: backend는 Micrometer `/actuator/prometheus`를 직접 수집하며 agent 메트릭 중복 전송은 끈다(`OTEL_METRICS_EXPORTER=none`). Prometheus(kube-prometheus-stack)의 추론 서버, DCGM exporter, kube-state-metrics, node-exporter 수집 경로는 유지한다. 추론 지표 이름·노출 포트는 실제 런타임별로 확인한다. API별 평균·p95 대시보드와 histogram 설정은 이번 변경 범위가 아니다.
-- 로그: Alloy DaemonSet → Loki(JSON 구조화, **발화 텍스트 제외**). Loki/Tempo 저장소 S3, 짧은 retention.
+- 로그: Alloy DaemonSet → Loki(JSON 구조화, **발화 텍스트 제외**). Loki는 작은 초기 배포에 Monolithic(이전 Helm 명칭 `SingleBinary`, `singleBinary` values 키는 유지) 단일 복제본을 사용한다. Loki 저장소는 초기 배포부터 S3로 구성하며, Tempo의 초기 시연은 임시 로컬 저장소를 허용한다. 운영 시 Loki/Tempo 저장소는 S3, 보관 기간은 짧게 설정한다.
 - 대시보드 목표인 vLLM 대기열/KV, GPU 사용률/메모리, 429/에러율은 유지한다. 이번 tracing 변경이 이 대시보드의 신규 구현·검증 완료를 의미하지는 않는다.
 - **후속 목표**: `turn_latency_seconds{stage}`, `sessions_started_total{preset}`, `rate_limited_total`, Redis 저장·복원 실패 메트릭, 첫 음성까지의 턴 지연 분해 대시보드는 별도 구현·검증 대상이다. TTS 시작/완료 span이나 Faro 브라우저 에러·성능 수집도 현재 구현으로 간주하지 않는다.
 
@@ -416,7 +417,7 @@ Redis 매니페스트는 `k8s-manifests`에 두며 공식 이미지 버전을 �
 | triton | `triton` main push | `docker buildx build` (레포 루트 컨텍스트) | ECR `triton:<sha>` | 동일 |
 
 **이미지 태그 정책 (backend·triton 공통)**
-- 태그는 **git commit SHA**로 고정한다(`${GITHUB_SHA}` 전체 또는 앞 12자리). 매니페스트에서 `latest`는 사용하지 않는다.
+- BE·Triton 이미지 태그는 **git commit SHA 앞 7자리**로 고정한다(`${GITHUB_SHA::7}`). FE의 S3 `commit` 메타데이터는 기존 전체 SHA를 유지한다. 매니페스트에서 `latest`는 사용하지 않는다.
 - ECR 리포지토리의 **tag immutability를 활성화**해 같은 태그를 덮어쓸 수 없게 한다(SHA 태그의 의미 보장).
 - **앱 이미지 배포/롤백** = `k8s-manifests`의 이미지 태그 변경/복귀 커밋. 단, Triton 배포는 `이미지 SHA/digest + AMI ID + 모델/토크나이저 revision + 모델 설정`의 호환 가능한 묶음으로 기록한다.
 - 가중치·토크나이저·런타임이 바뀌면 새 AMI 필요 여부와 기존 이미지의 호환성을 확인한다. 롤백도 이전 묶음의 가중치 접근과 두 모델 readiness를 검증한다. 이미지 SHA 복귀만으로 항상 복구된다고 가정하지 않는다.
