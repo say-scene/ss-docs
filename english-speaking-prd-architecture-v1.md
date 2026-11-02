@@ -2,6 +2,7 @@
 
 > 버전 v1 · 2026-10-21 · 상태: §9 후속 논의 확정 사항 통합 / 초기 전체 이력 전송 / 모델 한도 처리 추후 결정
 > 목적: 제품 경험·AI 서빙·인프라 운영을 입증하는 포트폴리오/PoC. 진행 중 대화·리포트·단어장은 브라우저에 저장하고, Redis는 진행 중 대화의 서버 측 임시 상태로 쓴다. 로그인·영구 서버 저장·SLO·HA는 제외한다.
+> 관측성 갱신: 2026-11-02 · FE 사용자 동작별 tracing 로컬 구현·검증 반영. 운영 배포는 별도이며, 변경 설명은 [사용자 동작 tracing](user-action-tracing.md)을 참고한다.
 
 ---
 
@@ -25,6 +26,7 @@
 | 탭·마이크 | 같은 브라우저 로컬 세션의 대화 상태 동기화, 입력 가능한 탭은 하나 | 마이크 사용권을 현재 탭으로 이전 가능 |
 | LLM 문맥 | 초기 구현은 설정 프롬프트와 Redis의 전체 유효 대화 이력을 매 요청 전송 | 요약·모델 한도 처리의 구체 정책과 구현은 추후 결정 |
 | 기존 PoC 인프라 | CloudFront/S3/ALB, kubeadm, Triton, Karpenter/KEDA, 관측성 | Redis 단일 파드 추가; 용량·복원·장애 처리 검증 필요 |
+| 요청 추적 | FE 사용자 동작별 trace + 페이지 단위 익명 `session.id`로 여러 API 흐름 조회 | STT→대화 응답 연결; 추론 서버 내부는 메트릭만 관측. 로컬 구현·검증 완료, 운영 미배포 |
 
 ---
 
@@ -149,6 +151,7 @@ sequenceDiagram
   - backend(AI는 mock): **1000 RPS 부하테스트**(k6)로 검증.
   - AI(STT+LLM): TPS가 아니라 "GPU 노드당 동시 세션 + p95 지연"으로 정의(벤치마크 후 결정).
 - **개인정보**: 음성 미저장, 로그/트레이스에 발화 텍스트 미기록.
+- **추적 경계**: API별 서버 처리 시간과 FE 사용자 동작 시간을 구분한다. 현재 `speech.turn`은 STT 요청부터 대화 응답 처리까지이며, 위의 턴 지연(말 끝남 → 첫 음성)이나 TTS 재생 완료 시간과 동일하지 않다(§6.8).
 - **접근 범위**: 사용자가 적용했다고 밝힌 단일 허용 IP 제한을 PoC 운영 전제로 둔다. 제한 위치와 적용 상태는 이번 문서 작업에서 검증하지 않았다. 세션 쿠키는 같은 IP 안의 브라우저별 대화를 구분한다(§6.9).
 - **STT 주의**: Whisper의 문법 자동 교정, 무음 환청 → `vad_filter`, temperature 0, `condition_on_previous_text=false`, 클라이언트 최소 발화 길이.
 
@@ -169,7 +172,8 @@ sequenceDiagram
 | `POST /lookup` | JSON | 단어장용 표제어·품사·뜻·예문 번역 |
 | `POST /report` | JSON | 최종 사용자 입력을 교정 대상으로 하고 AI 발화를 문맥으로 제공해 총평과 발화별 보충 생성 |
 
-- 경로와 필드 이름은 **계약 초안**이다. 단일 대화의 시작·복원·종료와 Redis 삭제의 원자성, 실패 응답은 구현 전에 확정한다.
+- 관측성 수집은 업무 API와 별개인 **`POST /api/telemetry/traces`**를 사용한다(`/api/v1` 접두사가 아님). 브라우저 OTLP/JSON을 검증·정제해 서버에 설정된 수집기로만 전달한다(§6.8).
+- 위 업무 API의 경로와 필드 이름은 **계약 초안**이다. 단일 대화의 시작·복원·종료와 Redis 삭제의 원자성, 실패 응답은 구현 전에 확정한다.
 - 기존 `/coach`(발화 후 비동기 “!” 추천)와 `/grammar` 버튼 계약은 새 추천·리포트 흐름과 다르므로 그대로 재사용하지 않는다. 문법 검사는 리포트 교정에 포함한다.
 - 모든 대화·추천·번역·리포트 요청에는 `sessionId`, `turnId`, `revision` 또는 명확한 `messageId`를 연결한다. 마지막 사용자 발화 수정 시 이전 revision의 Redis 이력과 파생 결과를 교체하고 늦은 응답을 폐기한다.
 - Spring Boot가 추측하기 어려운 불투명 세션 식별자를 발급하고 `HttpOnly; Secure; SameSite=Lax; Path=/` 쿠키로 전달한다. 쿠키에는 식별자만 저장하고 요청 시 브라우저가 자동 전송한다. 서버는 이 식별자의 세션을 확인하며 임의의 요청 `userId`를 세션 접근 근거로 쓰지 않는다. 쿠키·Redis가 만료되면 새 세션을 발급하고 남은 로컬 대화로 복구할 수 있다. 구체 만료 시간은 구현 시 정한다.
@@ -370,16 +374,22 @@ python3 openai_frontend/main.py \
 
 ### 6.8 관측성
 
-- Spring Boot backend: OTel Java agent → Alloy(OTLP) → Tempo. 스팬: `stt` → Redis 이력 조회/갱신 → `llm` → 문장 완료 → TTS 시작/완료. 커스텀 메트릭: `turn_latency_seconds{stage}`, `sessions_started_total{preset}`, `rate_limited_total`, Redis 저장·복원 실패 횟수.
-- 메트릭: Prometheus(kube-prometheus-stack)가 backend, Triton `:8002`(vLLM 지표 포함 여부 확인), DCGM exporter, kube-state-metrics, node-exporter 수집.
+- **구현 상태(2026-11-02)**: FE 사용자 동작별 tracing과 BE 수집 relay는 로컬 구현·검증 완료이며 운영에는 미배포다. 구현 방식·조회 예시·검증 결과는 [사용자 동작 tracing](user-action-tracing.md)에 정리한다.
+- **Trace 경계**: FE(`service.name=ss-fe`)가 동작별 부모 span을 만들고 API 요청마다 별도 CLIENT span의 `traceparent`를 전달한다. BE(`ss-be`)의 OTel Java agent가 SERVER → Redis/추론 HTTP CLIENT span을 같은 trace로 연결한다. 추론 서버 자체의 SERVER·내부 단계 span은 이번 변경에 추가하지 않으며, 내부 병목은 메트릭으로 확인한다.
+- **연결 단위**: `speech.turn`은 녹음 종료 후 STT 요청 → 대화 응답 처리를 한 trace로 묶는다. 번역·추천·조회 등 독립 동작은 별도 trace다. 자동 충돌 확인·재시도는 같은 동작 context를 유지하고, 나중의 수동 재시도는 새 trace를 사용한다. 시작/이어하기의 초기 동기화와 이후 첫 인사 생성, 종료와 리포트 생성은 각각 별도 동작이다.
+- **익명 흐름 조회**: FE span의 `session.id`는 페이지 메모리의 임의 UUID다. 동일 페이지의 여러 trace를 연결하되 새로고침·새 페이지에서는 회전한다. 실제 대화 `sessionId`, 업무 `requestId`, 로그인 사용자 식별자와 무관하며 브라우저 저장소에 보관하지 않는다. 이 속성은 FE span에만 있으므로 FE를 조건으로 trace를 찾은 뒤 연결된 BE span을 확인한다.
+- **수집 경로**: 브라우저 OTLP/JSON → same-origin `/api/telemetry/traces` → BE relay → Alloy(OTLP) → Tempo. `BROWSER_TELEMETRY_OTLP_ENDPOINT`는 서버의 고정 수집 주소다. 비어 있으면 relay 비활성화(`204`), 비어 있지 않은 잘못된 주소는 안전한 `503`으로 처리한다. Collector를 인터넷에 공개하거나 CORS를 확대하지 않는다.
+- **안전 경계**: FE는 알려진 same-origin API만 계측하고 발화·오디오·body·URL query·쿠키·인증 헤더·실제 대화 식별자·예외 원문을 기록하지 않는다. relay는 허용 필드만 재구성하고 크기·span 수·인스턴스별 요청량/동시 처리량을 제한한다. 계측 초기화·export 실패는 업무 요청을 막지 않으며 수집은 best effort다. 마이크/UI는 후속 대화 생성 완료를 기다리지 않고 기존대로 해제한다.
+- **메트릭**: backend는 Micrometer `/actuator/prometheus`를 직접 수집하며 agent 메트릭 중복 전송은 끈다(`OTEL_METRICS_EXPORTER=none`). Prometheus(kube-prometheus-stack)의 추론 서버, DCGM exporter, kube-state-metrics, node-exporter 수집 경로는 유지한다. 추론 지표 이름·노출 포트는 실제 런타임별로 확인한다. API별 평균·p95 대시보드와 histogram 설정은 이번 변경 범위가 아니다.
 - 로그: Alloy DaemonSet → Loki(JSON 구조화, **발화 텍스트 제외**). Loki/Tempo 저장소 S3, 짧은 retention.
-- (옵션) 브라우저 에러/성능: Alloy Faro receiver.
-- 대시보드: 턴 지연 분해, vLLM 대기열/KV, GPU 사용률/메모리, 429/에러율.
+- 대시보드 목표인 vLLM 대기열/KV, GPU 사용률/메모리, 429/에러율은 유지한다. 이번 tracing 변경이 이 대시보드의 신규 구현·검증 완료를 의미하지는 않는다.
+- **후속 목표**: `turn_latency_seconds{stage}`, `sessions_started_total{preset}`, `rate_limited_total`, Redis 저장·복원 실패 메트릭, 첫 음성까지의 턴 지연 분해 대시보드는 별도 구현·검증 대상이다. TTS 시작/완료 span이나 Faro 브라우저 에러·성능 수집도 현재 구현으로 간주하지 않는다.
 
 ### 6.9 보안/남용 방어 (WAF 없음)
 
 - 단일 허용 IP 제한을 운영 전제로 두고 추가 남용 방어 기능은 초기 범위를 최소화한다. 기존 IP별 rate limit(Bucket4j) 등은 초기 필수 기능에서 제외한다. 오디오 형식·요청 스키마와 중복 요청·revision 검증, 다운스트림 자원 상한은 정상 동작을 위해 유지한다. 모델 context 한도 대응 정책은 추후 결정한다.
-- Redis는 클러스터 내부에서 접근하고 세션 식별자·발화 텍스트를 로그에 남기지 않는다. 브라우저별 세션 식별은 서버 발급 쿠키(`HttpOnly`, `Secure`, `SameSite=Lax`)로 처리한다. 같은 IP를 사용자 식별자로 사용하지 않는다.
+- Redis는 클러스터 내부에서 접근하고 실제 업무 세션 식별자·발화 텍스트를 로그에 남기지 않는다. 브라우저별 대화 세션 식별은 서버 발급 쿠키(`HttpOnly`, `Secure`, `SameSite=Lax`)로 처리한다. 관측용 익명 `session.id`는 이 쿠키/대화 세션과 별개이며 인증·접근 권한 판단에 사용하지 않는다(§6.8). 같은 IP를 사용자 식별자로 사용하지 않는다.
+- 브라우저 trace relay는 익명 수집 endpoint다. same-origin 조건과 인스턴스별 제한은 사용자 인증이나 서비스 전체 quota를 의미하지 않으며 기존 허용 IP 운영 전제를 대체하지 않는다.
 - 파드별 카운터는 스케일아웃·재시작을 통틀어 예산을 합산/보존하는 계약이 아니다. 서비스 전체 하드 캡이 필요하면 공유 상태 또는 별도 차단 방식을 사용자 결정 후 추가한다. Budgets 알림과 NodePool 상한도 총 지출의 하드 캡으로 표현하지 않는다.
 - ALB는 CloudFront prefix list + 커스텀 헤더 검증. 컨트롤러 IAM 최소화.
 - 노드는 인바운드 전부 SG 내부/ALB만 허용.
@@ -521,6 +531,7 @@ Redis 매니페스트는 `k8s-manifests`에 두며 공식 이미지 버전을 �
 | 대화 일관성 | 한 건의 진행 중 대화와 한 탭의 마이크, 탭 간 상태 동기화·종료 전파, Redis 완료 이력 우선 복원·없으면 로컬 복구, 같은 요청 ID 중복 처리 방지, 마지막 발화 수정·이전 revision 폐기, 리포트에서 사용자 입력만 평가 |
 | AI 서빙 | 기본 Triton 구성의 두 모델 READY, thinking OFF·구조화 출력·STT 디코딩 검증, 대표 혼합 부하의 VRAM·지연·오류율 실측 및 §9.1 성능 기준 충족 |
 | 인프라 | §7의 5개 기준, KEDA 부하 기반 스케일아웃/인, 워밍업/준비 실패 처리, 관측성, 호환 배포 묶음의 롤백 증거 |
+| 요청 추적 | 발화의 STT→대화 요청과 BE/downstream CLIENT가 동일 trace ID·올바른 부모 span으로 연결됨; 독립 동작의 trace 분리·익명 페이지 ID 연결, 재시도/취소·민감정보 제외 검증. 로컬 검증과 배포 후 CloudFront/ALB→수집기 검증을 구분 |
 | 개인정보·저장 | 음성 및 발화 텍스트의 로그/트레이스 미기록 확인; `localStorage` 대화 복원·용량 초과 안내·종료 삭제, Redis 세션 생성·복구·삭제, 공유 브라우저 노출 안내 검증; 실제 서버 영구 저장 미도입 |
 | 후속 문맥 처리 | 모델 한도·요약 정책은 보류 상태로 기록. 초기 전체 이력 전송 검증과 추후 긴 대화 처리 완료를 구분 |
 
