@@ -23,7 +23,7 @@ SayScene의 제품 명세, 하이브리드 아키텍처, 구축·운영·장애�
 | 관측성 | [읽는 순서](monitoring/README.md) · [kube-prometheus-stack 설치](monitoring/kube-prometheus-stack-install-v1.md) · [구성 개념](monitoring/kube-prometheus-stack-concepts-v1.md) · [Loki·Tempo·Alloy 운영](monitoring/sayscene-observability-manual-v1.md) · [DCGM Exporter](monitoring/dcgm-exporter-install-v1.md) |
 | FE 배포 | [읽는 순서](cicd/ss-fe/README.md) · [CI/CD 한 장 요약](cicd/ss-fe/ss-fe-cicd-overview-v1.md) · [실행 절차](cicd/ss-fe/ss-fe-cicd-runbook-v1.md) · [설계 근거](cicd/ss-fe/ss-fe-cicd-concepts-v1.md) |
 | 이미지 CI | [AWS OIDC 결정](cicd/gha/gha-ecr-aws-auth-decision-v1.md) · [BE Jib → ECR](cicd/gha/gha-ecr-jib-push-manual-v1.md) · [STT 저장소 Buildx → ECR](cicd/gha/gha-ecr-triton-push-manual-v1.md) |
-| 성능·장애 | [로컬 GPU vLLM 동시성 부하테스트](loadtest/vllm-concurrency-loadtest-v1.md) · [부하 분석·알림 설계 기록](monitoring/vllm-load-analysis-v1.md) · [슬롯 1–32 누적 대화 실험·슬롯 여유 대기 검토](monitoring/vllm-loadtest-results-20261103.md) · [2026-10-27 장애 기록](issue/20261027/README.md) |
+| 성능·장애 | [E2E 응답 지연 대응·슬롯 4 운영 기준](monitoring/e2e-latency-response-v1.md) · [로컬 GPU vLLM 동시성 부하테스트](loadtest/vllm-concurrency-loadtest-v1.md) · [부하 분석·알림 설계 기록](monitoring/vllm-load-analysis-v1.md) · [슬롯 1–32 누적 대화 실험·슬롯 여유 대기 검토](monitoring/vllm-loadtest-results-20261103.md) · [2026-10-27 장애 기록](issue/20261027/README.md) |
 
 설치 매뉴얼과 실험 문서는 **작성 시점의 과정·측정 조건**을 보존한다. GPU Triton·CPU LLM·이전 인스턴스 사양이나 당시의 미검증 상태가 남아 있을 수 있으므로 현재 상태는 PRD를 먼저 읽는다. [LLM AMI 제작 기록](manual/llm-ami-v2-build-v1.md)은 이전 AWS CPU LLM 경로의 기록이다.
 
