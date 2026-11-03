@@ -1,6 +1,6 @@
 # ss-fe CI/CD 개념 설명
 
-절차는 [ss-fe-cicd-runbook-v1.md](ss-fe-cicd-runbook-v1.md) 참조. 이 문서는 "왜 그렇게 하는가"만 다룬다.
+처음이면 [overview](ss-fe-cicd-overview-v1.md) 부터. 절차는 [runbook](ss-fe-cicd-runbook-v1.md) 참조. 이 문서는 "왜 그렇게 하는가"만 다룬다.
 
 ---
 
@@ -408,11 +408,23 @@ run 39899674140   index-BbsUUV-p.css  index-CMwohPtJ.js  sayscene-logo.png
 
 위의 재업로드 동작과 맞물려 **메타데이터가 없는 객체 = 현재 배포에 포함되지 않은 잔여물**이라는 신호가 공짜로 생긴다. lifecycle rule로 정리할 때의 판별 기준이 된다.
 
-### invalidation은 `/index.html`만 (B구간)
+### invalidation은 쓰지 않는다
 
-CloudFront는 S3 앞에서 따로 캐시한다. S3를 바꿔도 모른다. 그래서 `index.html`만 "버려라"고 알려준다.
+CloudFront는 S3 앞에서 따로 캐시하므로 보통은 배포마다 `index.html`을 "버려라"고 알려줘야 한다. 그런데 이 구성에서는 필요가 없다.
 
-asset은 파일명이 새로워서 CloudFront가 **처음 보는 파일**로 취급하고 알아서 가져온다. 무효화할 게 없다. 월 1,000건까지 무료이고, `/*`로 전체를 무효화하면 과금 대상이 되고 느리다.
+2026-10-27에 배포 도메인으로 같은 요청을 세 번 보내 확인했다.
+
+```
+1회차  x-cache: Miss from cloudfront
+2회차  x-cache: RefreshHit from cloudfront   ← 원본에 재확인했고 내용이 같았다
+3회차  x-cache: Hit from cloudfront
+```
+
+`index.html`에 `no-cache`를 붙여 뒀기 때문에 CloudFront가 원본에 재확인한다. 그래서 배포하면 수 초 안에 반영되고, 무효화가 추가로 해 줄 일이 없다.
+
+asset은 애초에 대상이 아니다. 파일명이 새로워서 CloudFront가 **처음 보는 파일**로 취급하고 알아서 가져온다. 실제로 `immutable`로 캐시되어 `Hit`으로 응답한다.
+
+PRD §6.10에는 배포 단계로 `CloudFront invalidation(/index.html)`이 적혀 있다. 틀린 게 아니라 명시적 보장 수단이고, `no-cache`가 같은 효과를 내고 있어 우선순위가 낮다. 월 1,000건까지 무료라 나중에 넣어도 비용 문제는 없다.
 
 ---
 
@@ -501,18 +513,66 @@ kubectl 명령어     →    레포 안 ss-k8s 매니페스트
 
 ---
 
-## 12. 알아둘 것 — 배포 후 `/api` 호출은 실패한다
+## 12. 엣지 구성 — 측정으로 확인한 상태
+
+CloudFront 배포는 이번에 만든 것이 아니라 기존 PoC에서 넘어온 자원이다(PRD의 "기존 PoC 인프라"). 저장소에는 PRD §6.3의 설계만 있고 실제 구성 기록이 없어서, 2026-10-27에 배포 도메인으로 직접 요청해 상태를 확인했다.
 
 ```
-개발:  브라우저 → vite dev server → 프록시(/api → localhost:8080)
-운영:  브라우저 → CloudFront → /* → S3 → /api/v1 없음 → 실패
+/                        200  no-cache
+/assets/index-*.js       200  immutable · Hit
+POST /api/v1/demo/echo   200  application/json
+/argocd/                 200  text/html
+S3 객체 URL 직접          403                   ← OAC 정상
+/chat  /home  /reports   403  application/xml   ← 이 앱이 쓰지 않는 경로
 ```
 
-`vite.config.ts`의 프록시는 dev 전용이다. CloudFront behavior가 `/*` → S3 하나뿐이라 API 호출이 S3에서 파일을 찾다가 실패한다.
+`/api/*` behavior는 이미 붙어 있고 `ss-be`가 응답한다. same-origin이라 FE가 API를 `/api/v1` 상대 경로로 부르고, 그래서 **빌드 타임 환경변수가 필요 없다.** 번들이 환경 독립적이고 CI secret이 줄어든다. `vite.config.ts`의 프록시는 dev 전용이지만, 운영에서는 CloudFront behavior가 같은 역할을 한다.
 
-`ss-be`가 뜨고 ALB가 생긴 뒤 `/api/*` behavior를 추가해야 해결된다. 그때까지 "화면은 뜨는데 API가 안 된다"가 나오면 **코드 문제가 아니라 아직 안 만든 인프라** 때문이다.
+### 해시 라우팅이라 CloudFront 설정이 필요 없다
 
-덤으로, CloudFront same-origin이라 FE가 API를 `/api/v1` 상대 경로로 부른다 → **빌드 타임 환경변수가 필요 없다.** 번들이 환경 독립적이고 CI secret이 줄어든다.
+`src/App.tsx`가 `window.location.hash`로 화면을 고른다. 라우터 의존성이 없고 `pushState`도 쓰지 않는다.
+
+```ts
+const [route, setRoute] = useState(window.location.hash);
+const navigate = (hash: string) => { window.location.hash = hash; setRoute(hash); };
+```
+
+실제 주소는 `#home`, `#chat/hotel-checkin`, `#report`, `#reports`, `#demo` 형태다.
+
+**`#` 뒤는 서버로 전송되지 않는다.** 이게 핵심이다.
+
+```
+사용자 주소창:  https://<도메인>/#chat/hotel-checkin
+실제 HTTP 요청:  GET /                      ← # 뒤는 안 보냄
+S3가 주는 것:    index.html                 ← 항상 있음
+앱이 하는 일:    hash 읽고 ChatRoom 렌더
+```
+
+그래서 새로고침·북마크·링크 공유가 설정 없이 이미 동작한다. 위 측정의 `/chat` 403은 **이 앱이 만들어내지 않는 주소**에 대한 정상 응답이다. 403을 보고 "SPA 라우팅이 깨졌다"고 판단했다가, 소스를 읽고 정정했다.
+
+### 경로 기반으로 바뀌면 필요해진다
+
+해시를 경로로 바꾸거나, `react-router`의 `BrowserRouter`를 도입하거나, `pushState`를 직접 쓰면 그 즉시 새로고침이 깨진다.
+
+```
+첫 진입   /        → index.html 있음    ✓
+화면 이동  /chat    → JS가 처리          ✓
+새로고침  /chat    → S3에 파일 없음     ✗ 403
+```
+
+그때는 확장자 없는 경로를 `/index.html`로 재작성하는 **CloudFront Function(viewer-request)** 을 S3 behavior에만 연결한다.
+
+```js
+function handler(event) {
+  var uri = event.request.uri;
+  if (!uri.includes('.')) { event.request.uri = '/index.html'; }
+  return event.request;
+}
+```
+
+**배포 전체에 적용되는 "사용자 지정 오류 응답(403/404 → index.html)"으로 해결하지 않는다.** 그 방식은 `/api`가 정상적으로 돌려주는 404까지 `index.html`로 바꿔 버려서 API 오류를 추적할 수 없게 만든다. 같은 이유로 그 함수를 `/api/*`나 `/argocd*` behavior에 연결하지 않는다. PRD §6.3도 같은 금지를 적어 뒀다.
+
+FE 코드 변경이 인프라 작업을 유발하는 지점이다. 라우터 의존성이 추가되는지 보는 것이 신호다.
 
 ---
 
@@ -535,6 +595,8 @@ kubectl 명령어     →    레포 안 ss-k8s 매니페스트
 
 | | 내용 |
 |---|---|
+| 라우팅 방식 | 지금은 해시 라우팅이라 엣지 설정이 불필요. 경로 기반으로 바뀌면 viewer-request 함수가 필요해진다. §12 참고 |
+| 엣지 구성 기록 | 배포 ID와 지금 붙어 있는 behavior 목록이 저장소에 없다. 떠 있는 것이 PRD §6.3 설계대로인지 저장소만 보고는 알 수 없다 |
 | git 커밋 신원 | 작성자가 `ai-ncw <likencw@naver.com>`. GitHub 계정은 `namchn` → contribution 그래프에 안 잡힐 수 있음 |
 | `.DS_Store` | `ss-fe`는 `.gitignore`에 있음. `ss-be`, `ss-triton`, `ss-k8s`, `ss-docs`는 아직 |
 | PRD §6.10 레포 이름 | PRD는 `frontend`/`backend`/`triton`/`k8s-manifests`, 실제는 `ss-*`. `ss-docs`는 표에 없음 |
