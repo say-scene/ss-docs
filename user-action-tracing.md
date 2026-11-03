@@ -1,6 +1,7 @@
 # 사용자 동작 tracing 변경 요약
 
-> 2026-11-02 · 초기 로컬 구현·검증 기록 / 운영 반영·검증은 별도 확인 · 요구사항: [PRD §6.8](english-speaking-prd-architecture-v1.md#68-관측성)
+> 구현 기록: 2026-11-02 · 운영 상태 갱신: 2026-11-03 · 현재 명세: [PRD 관측성](english-speaking-prd-architecture-v1.md#6-관측성)
+> 사용자 확인: Grafana·Tempo의 FE→BE trace 조회, Alloy의 OTel·로그 수집, Loki 로그 조회와 Alertmanager→Discord 알림 수신을 운영에서 확인했다. 아래 로컬 테스트 기록은 당시의 검증 범위를 보존한다.
 
 ## 무엇을 바꿨나
 
@@ -42,7 +43,7 @@ BROWSER_TELEMETRY_OTLP_ENDPOINT=http://alloy-otlp.monitoring.svc.cluster.local:4
 
 주소가 비어 있으면 relay는 비활성화(`204`), 비어 있지 않은 잘못된 주소는 `503`과 고정 경고로 처리한다. FE·BE·ConfigMap 변경을 함께 반영해야 한다.
 
-FE main merge는 GitHub Actions의 자동 배포를 실행하지만, BE의 Argo CD Application `sayscene`은 현재 수동 sync 방식(`targetRevision: HEAD`)이다. Git merge·이미지 태그 갱신만으로 BE 파드가 반영되지는 않는다. `envFrom` ConfigMap 변경도 기존 파드를 자동 재시작하지 않으므로, 실제 반영 시 **수집 주소 ConfigMap 적용 → 새 BE 이미지/파드 rollout → FE 연결 확인**을 함께 검증한다. 클러스터 sync는 별도 승인 대상이며 이 문서는 운영 수집 성공을 증명하지 않는다.
+FE main merge는 GitHub Actions의 자동 배포를 실행하지만, BE의 Argo CD Application `sayscene`은 수동 sync 방식(`targetRevision: HEAD`)이다. Git merge·이미지 태그 갱신만으로 BE 파드가 반영되지는 않는다. `envFrom` ConfigMap 변경도 기존 파드를 자동 재시작하지 않으므로, 이후 변경도 **수집 주소 ConfigMap 적용 → 새 BE 이미지/파드 rollout → FE 연결 확인**을 함께 검증한다. 이 문서의 갱신 작업에서는 클러스터 sync나 배포를 실행하지 않았다.
 
 Tempo에서 발화를 찾고, 해당 FE span의 `session.id`로 같은 페이지의 다른 API 흐름을 조회한다.
 
@@ -51,9 +52,9 @@ Tempo에서 발화를 찾고, 해당 FE span의 `session.id`로 같은 페이지
 { resource.service.name = "ss-fe" && span.session.id = "관측용-UUID" }
 ```
 
-## 검증과 남은 범위
+## 구현 시 검증과 현재 범위
 
 - 구현 시 FE **73개**, BE **43개** 테스트와 양쪽 빌드, Kustomize 렌더링 통과.
 - 실제 Chrome → FE SDK → BE Java agent → **모의** 추론 서버/수집기에서 동일 trace ID·부모/자식 span, 독립 동작 분리·페이지 ID 회전·FE 민감정보 제외 확인. 실제 마이크/실제 모델·운영 경로 전체 검증을 뜻하지 않는다.
-- FE CLIENT 시간은 응답 헤더 수신까지, `speech.turn`은 이어지는 응답 처리까지다. 첫 TTS 음성/재생 완료 시간, 추론 내부 tracing, API p95용 histogram·대시보드는 이번 범위가 아니다.
-- 운영 CloudFront/ALB의 전달과 수집 성공은 배포 후 검증 대상이다. 기존 개발 의존성 보안 경고 3건은 별도이며 구현 당시 운영 의존성 감사는 0건이었다.
+- FE CLIENT 시간은 응답 헤더 수신까지, `speech.turn`은 이어지는 응답 처리까지다. 첫 TTS 음성/재생 완료 시간과 추론 내부 tracing은 계측하지 않는다. 현재 Kubernetes ConfigMap은 BE HTTP histogram을 활성화하며 Grafana 대시보드·패널도 운영에서 확인됐다. 브라우저 동작 trace와 API p95 지표는 다른 측정이다.
+- FE→BE trace의 운영 조회·수집 성공은 2026-11-03 사용자 확인을 반영했다. 노드별 로그 수집 범위와 저장 설정은 현재 [PRD 관측성](english-speaking-prd-architecture-v1.md#6-관측성) 및 ss-k8s values를 따른다. 과거 테스트 수·의존성 감사 결과는 구현 당시 기록이며 현재 상태를 보증하는 수치는 아니다.
