@@ -1,4 +1,6 @@
-# ss-fe — main push 한 장 요약
+# ss-fe CI/CD 개요 — main push 한 장 요약
+
+처음이면 이 문서부터. 왜 그렇게 하는지는 [concepts](ss-fe-cicd-concepts-v1.md), 따라 할 절차는 [runbook](ss-fe-cicd-runbook-v1.md).
 
 ## 미리 준비 (1회성)
 

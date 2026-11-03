@@ -1,6 +1,6 @@
 # ss-fe CI/CD 개념 설명
 
-절차는 [ss-fe-cicd-runbook-v1.md](ss-fe-cicd-runbook-v1.md) 참조. 이 문서는 "왜 그렇게 하는가"만 다룬다.
+처음이면 [overview](ss-fe-cicd-overview-v1.md) 부터. 절차는 [runbook](ss-fe-cicd-runbook-v1.md) 참조. 이 문서는 "왜 그렇게 하는가"만 다룬다.
 
 ---
 
