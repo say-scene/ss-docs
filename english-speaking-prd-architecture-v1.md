@@ -145,7 +145,7 @@ AWS GPU를 확보하지 못해 **로컬 RTX 4060 8 GB·WSL2 워커**를 클러�
 | 위치 | `ss-k8s/apps/ss-vllm`, namespace `vllm`, Deployment `vllm-qwen` |
 | 이미지·모델 | `vllm/vllm-openai:v0.32.0-cu129`, `Qwen/Qwen3-4B-FP8`의 고정 revision |
 | BE 접속 | `http://vllm-qwen.vllm.svc.cluster.local:8000`, 모델 이름 `qwen3-4b-fp8` |
-| 실행 설정 | `dtype=half`, context 4096, `max-num-seqs=1`(동시성 비교 실험 설정), batched tokens 512, GPU 사용 예산 0.80, chunked prefill·eager |
+| 실행 설정 | `dtype=half`, context 4096, `max-num-seqs=4`, batched tokens 512, GPU 사용 예산 0.80, chunked prefill·eager |
 | 캐시·교체 | WSL 워커의 `/var/lib/sayscene-gpu/huggingface` local PV 30 GiB, Retain. 단일 파드 `Recreate` |
 
 BE는 HTTP/1.1 OpenAI 호환 `/v1/chat/completions`에 `stream:false`로 요청한다. 서버의 상황 프롬프트와 **전체 유효 대화 이력**을 보내며 자동 요약·토큰 절단은 구현하지 않는다. 출력 상한은 대화 128·추천 256·lookup 512·번역 2048·리포트 4096이다. **출력 상한은 실제 생성 길이나 입력 여유를 보장하지 않으며, 입력+출력은 모델 context 제한을 함께 받는다.**
